@@ -1,0 +1,126 @@
+# cortex-lm configuration schema with all valid keys and defaults.
+# This file documents every valid option. Copy and override in minimal/standard/bioplausible.
+
+# ── Model identity ────────────────────────────────────────────
+name: cortex-lm
+version: "0.1"
+
+# ── Data ──────────────────────────────────────────────────────
+data:
+  dataset: tinystories         # tinystories | wikitext2 | wikitext103 | openwebtext | ptb
+  tokenizer: bpe               # char | bpe | bytes | byte_patch | tiktoken
+  vocab_size: 4096             # null = infer from data; int = target vocab for bpe/byte_patch
+  seq_len: 256                 # tokens per training chunk
+  train_split: 0.9             # fraction for train (only used if dataset has no val split)
+  bpe_train_sample: 500000     # characters to sample for BPE training
+  byte_patch_size: 4           # 2 | 4 | 8 (for byte_patch tokenizer)
+  tiktoken_encoding: cl100k_base
+  openwebtext_token_limit: 10000000  # cap for streaming OWT (tokens)
+  num_workers: 2
+  streaming: false             # use streaming for OWT automatically
+
+# ── Neuron model ──────────────────────────────────────────────
+neuron:
+  model: rate_adex             # rate | rate_adex | lif
+  nonlinearity: tanh           # tanh | sigmoid | relu
+  tau_m_dist: lognormal        # fixed | lognormal | uniform
+  tau_m_range: [2, 30]         # timesteps (lo, hi)
+  tau_w_dist: lognormal
+  tau_w_range: [30, 500]       # timesteps
+  adaptation_a: 0.1            # subthreshold adaptation coupling v→w (AdEx only)
+  learn_taus: false            # make τ learnable parameters (ablation)
+
+# ── Synapse model ─────────────────────────────────────────────
+synapse:
+  inter_column_stp: true       # Tsodyks-Markram STP on inter-column synapses
+  tau_f_range: [50, 300]       # facilitation τ range (timesteps)
+  tau_d_range: [100, 800]      # depression τ range (timesteps)
+  e_synapse_type: depressing   # depressing | facilitating | mixed
+  i_synapse_type: facilitating
+  U0_e: 0.2                    # baseline release probability, excitatory
+  U0_i: 0.5                    # baseline release probability, inhibitory
+
+# ── Column architecture ───────────────────────────────────────
+column:
+  model: layered               # simple_ei | layered
+  n_columns: 16
+  disinhibition: false         # VIP→SST→pyramidal disinhibitory circuit
+  # Neuron counts per layer (layered model only)
+  layer_sizes:
+    l4:  {n_e: 80,  n_i: 20}
+    l23: {n_e: 160, n_i: 40}
+    l5:  {n_e: 80,  n_i: 20}
+    l6:  {n_e: 80,  n_i: 20}
+  # simple_ei column only
+  n_e: 80
+  n_i: 20
+
+# ── Inter-column connectivity ──────────────────────────────────
+connectivity:
+  type: gaussian_1d            # gaussian_1d | small_world | random_sparse
+  # gaussian_1d params:
+  p_max: 0.7
+  sigma: 3.0                   # spread in column-index units
+  # small_world params:
+  k: 4                         # local degree in ring lattice
+  beta: 0.1                    # rewiring probability
+
+# ── Hippocampus ────────────────────────────────────────────────
+hippocampus:
+  model: none                  # none | modern_hopfield
+  n_memories: 512              # number of stored memory patterns
+  d_model: 256                 # Hopfield memory dimension
+  beta: 1.0                    # inverse temperature (retrieval sharpness)
+  ca1: false                   # enable CA1 mismatch/surprise signal
+
+# ── Readout ────────────────────────────────────────────────────
+readout:
+  source: l5                   # l5 | l23 | all_layers
+  n_layers: 2                  # linear layers before final projection
+  hidden_dim: 256
+
+# ── Token embedding ────────────────────────────────────────────
+embedding:
+  dim: 64
+
+# ── Learning rule ─────────────────────────────────────────────
+learning:
+  rule: bptt                   # bptt | eprop
+  truncated_bptt_k: null       # null = full BPTT; int = truncate at k steps
+  reset_state_between_batches: false
+  eprop_tau_e: null            # null = use mean tau_m; float = explicit trace decay
+
+# ── Training ──────────────────────────────────────────────────
+training:
+  batch_size: 32
+  max_steps: 100000
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  optimizer: adamw             # adam | adamw
+  scheduler: cosine            # none | cosine | linear
+  warmup_steps: 1000
+  eval_interval: 500
+  checkpoint_interval: 5000
+  checkpoint_dir: checkpoints
+  seed: 42
+
+# ── Simulation timestep ────────────────────────────────────────
+simulation:
+  dt: 1.0                      # timesteps per token
+
+# ── Logging ───────────────────────────────────────────────────
+logging:
+  wandb: false
+  project: cortex-lm
+  log_interval: 100
+  log_weight_stats: true
+  log_tau_stats: true
+  log_spike_rates: true
+
+# ── Baseline models (for run_baselines.py) ────────────────────
+baseline:
+  hidden_size: 256             # matched via binary search by default
+  n_layers: 2
+  n_heads: 4                   # transformer only
+  d_ff: 512                    # transformer only

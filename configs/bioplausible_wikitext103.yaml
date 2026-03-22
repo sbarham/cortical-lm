@@ -1,0 +1,86 @@
+# Phase 3: biologically plausible — same as standard but with e-prop learning rule.
+# Scientific contribution: quantify degradation from BPTT→e-prop on identical architecture.
+
+name: cortex-lm-bioplausible
+version: "0.1"
+
+data:
+  dataset: wikitext103
+  tokenizer: bpe
+  vocab_size: 4096
+  seq_len: 256
+
+neuron:
+  model: rate_adex
+  nonlinearity: tanh
+  tau_m_dist: lognormal
+  tau_m_range: [2, 30]
+  tau_w_dist: lognormal
+  tau_w_range: [30, 500]
+  adaptation_a: 0.1
+  learn_taus: false
+
+synapse:
+  inter_column_stp: true
+  tau_f_range: [50, 300]
+  tau_d_range: [100, 800]
+  U0_e: 0.2
+  U0_i: 0.5
+
+column:
+  model: layered
+  n_columns: 16
+  disinhibition: false
+  layer_sizes:
+    l4:  {n_e: 80,  n_i: 20}
+    l23: {n_e: 160, n_i: 40}
+    l5:  {n_e: 80,  n_i: 20}
+    l6:  {n_e: 80,  n_i: 20}
+
+connectivity:
+  type: gaussian_1d
+  p_max: 0.7
+  sigma: 3.0
+
+hippocampus:
+  model: modern_hopfield
+  n_memories: 512
+  d_model: 256
+  beta: 1.0
+  ca1: true   # CA1 surprise signal enabled; can serve as e-prop learning signal
+
+readout:
+  source: l5
+  n_layers: 2
+  hidden_dim: 256
+
+embedding:
+  dim: 64
+
+learning:
+  rule: eprop
+  eprop_tau_e: null   # null = use mean tau_m; set explicitly to override
+  reset_state_between_batches: false
+
+training:
+  batch_size: 128       # same architecture as standard; reduce if OOM
+  max_steps: 20000      # ~655M tokens (128 * 256 * 20k)
+  lr: 1.0e-4            # lower LR for e-prop stability
+  weight_decay: 1.0e-4
+  grad_clip: 0.5
+  optimizer: adamw
+  scheduler: cosine
+  warmup_steps: 400     # slightly longer warmup for e-prop
+  eval_interval: 400
+  checkpoint_interval: 500
+  seed: 42
+
+simulation:
+  dt: 1.0
+
+logging:
+  wandb: false
+  log_interval: 100
+  log_weight_stats: true
+  log_tau_stats: true
+  log_spike_rates: true

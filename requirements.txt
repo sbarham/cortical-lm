@@ -1,0 +1,11 @@
+torch>=2.0
+numpy
+scipy
+matplotlib
+pyyaml
+datasets>=2.0
+tokenizers>=0.13
+wandb
+tqdm
+tiktoken
+pytest
