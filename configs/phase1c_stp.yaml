@@ -33,10 +33,10 @@ column:
   n_columns: 8
   disinhibition: false
   layer_sizes:
-    l4:  {n_e: 8,  n_i: 2}
-    l23: {n_e: 16, n_i: 4}
-    l5:  {n_e: 8,  n_i: 2}
-    l6:  {n_e: 8,  n_i: 2}
+    l4:  {n_e: 16, n_i: 4}
+    l23: {n_e: 32, n_i: 8}
+    l5:  {n_e: 16, n_i: 4}
+    l6:  {n_e: 12, n_i: 3}
 
 connectivity:
   type: gaussian_1d
@@ -60,7 +60,7 @@ learning:
 
 training:
   batch_size: 512
-  max_steps: 8000
+  max_tokens: 524_288_000   # canonical Phase 1 budget; steps auto-scale with batch_size
   lr: 3.0e-4
   weight_decay: 1.0e-4
   grad_clip: 1.0

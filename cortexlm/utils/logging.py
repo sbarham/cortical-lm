@@ -62,7 +62,9 @@ class Logger:
         self._metrics_file.write(json.dumps(record) + "\n")
 
         if self.use_wandb and self._wandb is not None:
-            self._wandb.log(metrics, step=step)
+            # Use tokens as the x-axis so runs with different batch sizes are comparable
+            wandb_step = metrics.get("tokens", step)
+            self._wandb.log(metrics, step=wandb_step)
 
     def finish(self):
         self._metrics_file.close()

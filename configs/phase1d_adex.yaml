@@ -32,45 +32,45 @@ synapse:
 
 column:
   model: layered
-  n_columns: 16
+  n_columns: 8
   disinhibition: false
   layer_sizes:
-    l4:  {n_e: 80,  n_i: 20}
-    l23: {n_e: 160, n_i: 40}
-    l5:  {n_e: 80,  n_i: 20}
-    l6:  {n_e: 80,  n_i: 20}
+    l4:  {n_e: 16, n_i: 4}
+    l23: {n_e: 32, n_i: 8}
+    l5:  {n_e: 16, n_i: 4}
+    l6:  {n_e: 12, n_i: 3}
 
 connectivity:
   type: gaussian_1d
   p_max: 0.7
-  sigma: 3.0
+  sigma: 2.0
 
 hippocampus:
   model: none                 # Hopfield off — isolate AdEx effect
 
 readout:
   source: l5
-  n_layers: 2
-  hidden_dim: 256
+  n_layers: 1
+  hidden_dim: 128
 
 embedding:
-  dim: 64
+  dim: 32
 
 learning:
   rule: bptt
-  truncated_bptt_k: 64
+  truncated_bptt_k: 32
   reset_state_between_batches: false
 
 training:
-  batch_size: 128       # larger model; reduce to 64 if OOM
-  max_steps: 20000      # ~330M tokens
+  batch_size: 512
+  max_tokens: 524_288_000   # canonical Phase 1 budget; steps auto-scale with batch_size
   lr: 3.0e-4
   weight_decay: 1.0e-4
   grad_clip: 1.0
   optimizer: adamw
   scheduler: cosine
-  warmup_steps: 200
-  eval_interval: 400
+  warmup_steps: 100
+  eval_interval: 200
   checkpoint_interval: 500
   seed: 42
 

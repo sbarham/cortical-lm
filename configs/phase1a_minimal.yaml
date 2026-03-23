@@ -47,8 +47,8 @@ learning:
   truncated_bptt_k: null
 
 training:
-  batch_size: 512       # RTX 5060 Ti 8GB — ~500M tokens over 8k steps
-  max_steps: 8000
+  batch_size: 512
+  max_tokens: 524_288_000   # 512 * 128 * 8000 — canonical Phase 1 budget; steps auto-scale with batch_size
   lr: 3.0e-4
   weight_decay: 1.0e-4
   grad_clip: 1.0

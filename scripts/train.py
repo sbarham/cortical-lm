@@ -110,8 +110,12 @@ def main():
                         help="Config overrides as key=value pairs (e.g. training.lr=1e-3)")
     parser.add_argument("--count-params", action="store_true",
                         help="Print parameter count breakdown and exit (no training)")
+    parser.add_argument("--tokenizer", default=None,
+                        help="Path to a saved tokenizer.pkl (skips BPE retraining)")
     parser.add_argument("--no-cache", action="store_true",
                         help="Ignore existing token cache and re-tokenize from scratch")
+    parser.add_argument("--wandb", action="store_true",
+                        help="Enable Weights & Biases logging (overrides config)")
     args = parser.parse_args()
 
     # Parse overrides — dotted keys like "training.batch_size=128" become nested dicts
@@ -140,6 +144,8 @@ def main():
         _nested_set(overrides, k, _parse_val(v))
 
     config = get_config(args.config, overrides if overrides else None)
+    if args.wandb:
+        config.setdefault("logging", {})["wandb"] = True
     setup_logging()
 
     # ── Auto-derive checkpoint directory from run name ──────────────────────
@@ -168,7 +174,13 @@ def main():
 
     # ── Tokenizer ──────────────────────────────────────────────────────────
     print("[ 1/4 ] Building tokenizer")
-    tokenizer = build_tokenizer(config)
+    if args.tokenizer:
+        import pickle
+        print(f"  Loading tokenizer from {args.tokenizer}")
+        with open(args.tokenizer, "rb") as _f:
+            tokenizer = pickle.load(_f)
+    else:
+        tokenizer = build_tokenizer(config)
     vocab_size = tokenizer.vocab_size
     config["data"]["vocab_size"] = vocab_size
 
@@ -213,7 +225,9 @@ def main():
     logger = Logger(config)
 
     tcfg = config["training"]
-    print(f"  rule={config['learning']['rule']} | steps={tcfg['max_steps']:,} "
+    from cortexlm.learning.bptt import _resolve_max_steps
+    _max_steps = _resolve_max_steps(config)
+    print(f"  rule={config['learning']['rule']} | steps={_max_steps:,} "
           f"| batch={tcfg['batch_size']} | lr={tcfg['lr']} | seq_len={config['data']['seq_len']}")
     print()
 

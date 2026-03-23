@@ -43,6 +43,10 @@ class BatchedNeuronPop(nn.Module):
 
         # ── rate_adex extras ──────────────────────────────────────────────────
         self._has_adex = (model == "rate_adex")
+        # LayerNorm on synaptic inputs — applied in both rate and rate_adex branches.
+        # Keeps tanh'(LN(I)) ≈ 1, removing tanh from the spatial gradient product.
+        self.input_norm = nn.LayerNorm(n_neurons)
+
         if self._has_adex:
             dist_w = ncfg.get("tau_w_dist", "lognormal")
             lo_w, hi_w = ncfg.get("tau_w_range", [30.0, 500.0])
@@ -61,10 +65,6 @@ class BatchedNeuronPop(nn.Module):
         else:
             nonlin = ncfg.get("nonlinearity", "tanh")
             self._f = get_nonlinearity(nonlin)
-            # LayerNorm over synaptic inputs: normalizes I → keeps tanh' ≈ 1
-            # so per-layer gradient ≈ output_activation'(v) × ||W|| rather than
-            # output_activation'(v) × tanh'(I) × ||W||.  Applied over neuron dim.
-            self.input_norm = nn.LayerNorm(n_neurons)
 
     # ── forward ──────────────────────────────────────────────────────────────
 
@@ -77,21 +77,18 @@ class BatchedNeuronPop(nn.Module):
         alpha_m = (self.dt / self.tau_m).unsqueeze(0)
         v = state["v"]
 
+        x_norm = self.input_norm(x)
+
         if self._has_adex:
             alpha_w = (self.dt / self.tau_w).unsqueeze(0)
             w = state["w"]
-            dv = alpha_m * (-(v - self.E_L) + self.R * x - w)
+            dv = alpha_m * (-(v - self.E_L) + self.R * x_norm - w)
             dw = alpha_w * (self.a * (v - self.E_L) - w)
             v_new = v + dv
             w_new = w + dw
             r = (torch.tanh(v_new) + 1.0) / 2.0
             return r, {"v": v_new, "w": w_new}
         else:
-            # LayerNorm on synaptic input: keeps tanh' ≈ 1 at every step,
-            # eliminating tanh from the spatial gradient product.
-            # (tanh(v)+1)/2 replaces sigmoid: max gradient 0.5 vs 0.25,
-            # and avoids the double-squashing that collapses inter-layer gradients.
-            x_norm = self.input_norm(x)
             v_new = v + alpha_m * (-v + self._f(x_norm))
             r = (torch.tanh(v_new) + 1.0) / 2.0
             return r, {"v": v_new}

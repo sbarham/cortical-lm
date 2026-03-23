@@ -12,6 +12,19 @@ from cortexlm.model import CortexLM, ModelState
 from cortexlm.utils.metrics import compute_perplexity, compute_bpc
 
 
+def _resolve_max_steps(config: dict) -> int:
+    """Return max_steps, deriving from max_tokens if set (keeps total data constant across batch sizes)."""
+    tcfg = config["training"]
+    if "max_tokens" in tcfg:
+        batch_size = tcfg.get("batch_size", 32)
+        seq_len    = config.get("data", {}).get("seq_len", 128)
+        steps = max(1, int(tcfg["max_tokens"]) // (batch_size * seq_len))
+        print(f"  max_tokens={tcfg['max_tokens']:,} → max_steps={steps:,} "
+              f"(batch={batch_size}, seq_len={seq_len})")
+        return steps
+    return tcfg.get("max_steps", 100_000)
+
+
 class BPTTTrainer:
     """
     Standard BPTT trainer.
@@ -45,7 +58,7 @@ class BPTTTrainer:
         self.reset_state = config["learning"].get("reset_state_between_batches", False)
 
         # Scheduler
-        max_steps = tcfg.get("max_steps", 100_000)
+        max_steps = _resolve_max_steps(config)
         warmup = tcfg.get("warmup_steps", 1000)
         sched_name = tcfg.get("scheduler", "cosine")
 
@@ -180,7 +193,7 @@ class BPTTTrainer:
         """Full training loop."""
         from tqdm import tqdm
         tcfg = self.config["training"]
-        max_steps = tcfg.get("max_steps", 100_000)
+        max_steps = _resolve_max_steps(self.config)
         eval_interval = tcfg.get("eval_interval", 500)
         ckpt_interval = tcfg.get("checkpoint_interval", 5000)
         ckpt_dir = tcfg.get("checkpoint_dir", "checkpoints")

@@ -19,6 +19,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from cortexlm.utils.config import get_config
 from cortexlm.utils.metrics import compute_perplexity
+from cortexlm.utils.logging import Logger, setup_logging
 from cortexlm.model import CortexLM
 from cortexlm.data import get_dataset, make_dataloader, build_tokenizer
 from cortexlm.baselines import get_baseline
@@ -31,9 +32,15 @@ def count_params(model) -> int:
 def match_hidden_size(target_params: int, baseline_name: str, vocab_size: int,
                       embed_dim: int, n_layers: int, seq_len: int) -> int:
     """Binary search for hidden_size that gives ~target_params."""
+    # Transformer requires hidden_size divisible by n_heads=4; snap every
+    # candidate to the nearest multiple of 4 so the exception branch is
+    # never triggered by a divisibility error.
+    n_heads = 4
     lo, hi = 16, 4096
     for _ in range(20):
-        mid = (lo + hi) // 2
+        mid = ((lo + hi) // 2 // n_heads) * n_heads
+        if mid <= lo:
+            break
         try:
             m = _make_baseline(baseline_name, vocab_size, embed_dim, mid, n_layers, seq_len)
             p = count_params(m)
@@ -68,12 +75,21 @@ def _make_baseline(name, vocab_size, embed_dim, hidden_size, n_layers, seq_len):
     raise ValueError(name)
 
 
-def train_baseline(model, train_loader, val_loader, config, device, results_log):
+def train_baseline(model, name, train_loader, val_loader, config, device, results_log, logger=None):
     """Train one baseline model and log perplexity vs tokens."""
     model = model.to(device)
     tcfg = config["training"]
     optimizer = AdamW(model.parameters(), lr=tcfg["lr"], weight_decay=tcfg["weight_decay"])
-    scheduler = CosineAnnealingLR(optimizer, T_max=tcfg["max_steps"])
+    warmup = tcfg.get("warmup_steps", 100)
+
+    if "max_tokens" in tcfg:
+        batch_size = tcfg.get("batch_size", 32)
+        seq_len = config.get("data", {}).get("seq_len", 128)
+        max_steps = max(1, int(tcfg["max_tokens"]) // (batch_size * seq_len))
+    else:
+        max_steps = tcfg.get("max_steps", 100_000)
+
+    scheduler = CosineAnnealingLR(optimizer, T_max=max(max_steps - warmup, 1))
 
     perp_log = []
     tokens_seen = 0
@@ -81,7 +97,7 @@ def train_baseline(model, train_loader, val_loader, config, device, results_log)
     train_iter = iter(train_loader)
     eval_interval = tcfg["eval_interval"]
 
-    while step < tcfg["max_steps"]:
+    while step < max_steps:
         try:
             x, y = next(train_iter)
         except StopIteration:
@@ -98,7 +114,14 @@ def train_baseline(model, train_loader, val_loader, config, device, results_log)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), tcfg["grad_clip"])
         optimizer.step()
-        scheduler.step()
+
+        # Linear warmup then cosine decay
+        if step < warmup:
+            factor = (step + 1) / warmup
+            for pg in optimizer.param_groups:
+                pg["lr"] = tcfg["lr"] * factor
+        else:
+            scheduler.step()
 
         if step % eval_interval == 0:
             model.eval()
@@ -115,9 +138,24 @@ def train_baseline(model, train_loader, val_loader, config, device, results_log)
                     ).item()
                     n += 1
             val_loss /= max(n, 1)
-            perp = compute_perplexity(val_loss)
-            perp_log.append({"tokens": tokens_seen, "step": step, "perplexity": perp})
-            print(f"  step={step:6d} tokens={tokens_seen:10d} perplexity={perp:.2f}")
+            train_ppl = compute_perplexity(loss.item())
+            val_ppl   = compute_perplexity(val_loss)
+            lr = optimizer.param_groups[0]["lr"]
+            perp_log.append({
+                "tokens": tokens_seen, "step": step,
+                "val_perplexity": val_ppl, "train_perplexity": train_ppl,
+            })
+            print(f"  step={step:6d} | tokens={tokens_seen:10d} "
+                  f"| train_ppl={train_ppl:.2f} | val_ppl={val_ppl:.2f}")
+            if logger:
+                logger.log({
+                    "val/perplexity": val_ppl,
+                    "val/loss": val_loss,
+                    "train/perplexity": train_ppl,
+                    "train/loss": loss.item(),
+                    "lr": lr,
+                    "tokens": tokens_seen,
+                }, step=step)
 
         step += 1
 
@@ -131,12 +169,25 @@ def main():
     parser.add_argument("--models", nargs="+",
                         default=["rnn", "lstm", "lstm_attention", "transformer"])
     parser.add_argument("--output", default="baseline_results.json")
+    parser.add_argument("--tokenizer", default=None,
+                        help="Path to a saved tokenizer.pkl (skips BPE retraining)")
+    parser.add_argument("--wandb", action="store_true",
+                        help="Enable Weights & Biases logging (overrides config)")
     args = parser.parse_args()
 
     config = get_config(args.config)
+    if args.wandb:
+        config.setdefault("logging", {})["wandb"] = True
+    setup_logging()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    tokenizer = build_tokenizer(config)
+    if args.tokenizer:
+        import pickle
+        print(f"Loading tokenizer from {args.tokenizer}")
+        with open(args.tokenizer, "rb") as f:
+            tokenizer = pickle.load(f)
+    else:
+        tokenizer = build_tokenizer(config)
     config["data"]["vocab_size"] = tokenizer.vocab_size
     train_ds, val_ds, _, _ = get_dataset(config, tokenizer)
     train_loader = make_dataloader(train_ds, config, shuffle=True)
@@ -163,8 +214,16 @@ def main():
         n = count_params(model)
         print(f"  hidden_size={hidden}, params={n:,}")
 
+        baseline_config = {
+            **config,
+            "name": f"baseline-{name}",
+            "training": {**config["training"],
+                         "checkpoint_dir": f"checkpoints/baseline_{name}"},
+        }
+        logger = Logger(baseline_config)
         results_log = []
-        perp_log = train_baseline(model, train_loader, val_loader, config, device, results_log)
+        perp_log = train_baseline(model, name, train_loader, val_loader, config, device, results_log, logger)
+        logger.finish()
         all_results["baselines"][name] = {"params": n, "hidden_size": hidden, "log": perp_log}
 
     with open(args.output, "w") as f:

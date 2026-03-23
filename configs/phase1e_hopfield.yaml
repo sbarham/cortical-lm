@@ -65,7 +65,7 @@ learning:
 
 training:
   batch_size: 128       # larger model — reduce to 64 if OOM
-  max_steps: 20000      # ~330M tokens (128 * 128 * 20k)
+  max_tokens: 524_288_000   # canonical Phase 1 budget; steps auto-scale with batch_size
   lr: 3.0e-4
   weight_decay: 1.0e-4
   grad_clip: 1.0
