@@ -36,7 +36,7 @@ MANIFEST
 
 # Data and cache
 .data/
-data/
+/data/
 *.cache
 
 # Training artefacts
