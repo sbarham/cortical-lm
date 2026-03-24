@@ -77,7 +77,7 @@ def main():
     val_steps = np.array([r["step"] for r in val_recs]) if val_recs else np.array([])
     val_loss  = np.array([r["val/loss"] for r in val_recs]) if val_recs else np.array([])
     val_ppl   = np.array([r.get("val/perplexity", np.exp(r["val/loss"])) for r in val_recs]) if val_recs else np.array([])
-    val_bpc   = np.array([r.get("val/bpc", float("nan")) for r in val_recs]) if val_recs else np.array([])
+    val_bpb   = np.array([r.get("val/bpb", r.get("val/bpc", float("nan"))) for r in val_recs]) if val_recs else np.array([])
 
     # Smoothed train
     tr_loss_sm = ema_smooth(tr_loss.tolist(), alpha=args.smooth)
@@ -127,33 +127,27 @@ def main():
     # Draw intuitive threshold lines
     random_ppl = None
     # Try to infer vocab size from a val record
-    for r in val_recs:
-        if "val/bpc" in r and "val/loss" in r:
-            break
-    for r in train_recs:
-        if "train/perplexity" in r:
-            pass  # no vocab_size directly in metrics — skip threshold lines if unknown
     ax.axhline(y=500, color="gray", linestyle=":", linewidth=0.8, alpha=0.6, label="ppl=500")
     ax.axhline(y=100, color="gray", linestyle="--", linewidth=0.8, alpha=0.6, label="ppl=100")
     ax.legend(fontsize=7)
 
-    # ── Panel 3: Val BPC ──────────────────────────────────────────────────
+    # ── Panel 3: Val BPB ──────────────────────────────────────────────────
     ax = axes[1, 0]
-    if val_recs and not np.all(np.isnan(val_bpc)):
-        ax.plot(val_steps, val_bpc, color="#2ca02c", linewidth=1.5, marker="s",
-                markersize=4, label="val bpc")
+    if val_recs and not np.all(np.isnan(val_bpb)):
+        ax.plot(val_steps, val_bpb, color="#2ca02c", linewidth=1.5, marker="s",
+                markersize=4, label="val bpb")
         ax.axhline(y=1.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.7,
-                   label="bpc=1 (near-optimal)")
-        ax.set_ylabel("Bits per character")
-        ax.set_title("Val BPC")
+                   label="bpb=1 (near-optimal)")
+        ax.set_ylabel("Bits per byte")
+        ax.set_title("Val BPB")
         ax.legend(fontsize=8)
-        ax.annotate(f"{val_bpc[-1]:.3f}",
-                    xy=(val_steps[-1], val_bpc[-1]),
+        ax.annotate(f"{val_bpb[-1]:.3f}",
+                    xy=(val_steps[-1], val_bpb[-1]),
                     xytext=(8, 4), textcoords="offset points",
                     fontsize=7, color="#2ca02c")
     else:
-        ax.set_title("Val BPC (no data)")
-        ax.text(0.5, 0.5, "No BPC data yet", transform=ax.transAxes,
+        ax.set_title("Val BPB (no data)")
+        ax.text(0.5, 0.5, "No BPB data yet", transform=ax.transAxes,
                 ha="center", va="center", color="gray")
     ax.set_xlabel("Step")
     ax.grid(True, alpha=0.3)
@@ -203,8 +197,8 @@ def main():
         print(f"  Train loss: {float(tr_loss[-1]):.4f}  (ppl {float(tr_ppl[-1]):.1f})")
         if val_recs:
             print(f"  Val loss:   {float(val_loss[-1]):.4f}  (ppl {float(val_ppl[-1]):.1f})", end="")
-            if not np.all(np.isnan(val_bpc)):
-                print(f"  bpc {float(val_bpc[-1]):.4f}", end="")
+            if not np.all(np.isnan(val_bpb)):
+                print(f"  bpb {float(val_bpb[-1]):.4f}", end="")
             print()
 
 

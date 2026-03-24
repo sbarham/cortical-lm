@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn.functional as F
-from cortexlm.utils.metrics import compute_perplexity, compute_bpc, compute_effective_timescales
+from cortexlm.utils.metrics import compute_perplexity, compute_bpt, compute_bpb, compute_effective_timescales
 from cortexlm.model import CortexLM
 from cortexlm.data import get_dataset, make_dataloader, build_tokenizer
 
@@ -58,10 +58,13 @@ def main():
             n += 1
 
     avg_loss = total_loss / max(n, 1)
-    print(f"Split: {args.split}")
+    tokenizer = build_tokenizer(config)
+    avg_bpt = tokenizer.avg_bytes_per_token()
+    print(f"Split:      {args.split}")
     print(f"Loss:       {avg_loss:.4f}")
     print(f"Perplexity: {compute_perplexity(avg_loss):.2f}")
-    print(f"BPC:        {compute_bpc(avg_loss):.4f}")
+    print(f"BPT:        {compute_bpt(avg_loss):.4f}  (bits per token)")
+    print(f"BPB:        {compute_bpb(avg_loss, avg_bpt):.4f}  (bits per byte, avg {avg_bpt:.2f} bytes/token)")
 
 
 if __name__ == "__main__":

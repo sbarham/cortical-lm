@@ -54,7 +54,7 @@ def load_cortex_run(label: str, run_dir: str):
     Load a CortexLM run from metrics.jsonl.
 
     Returns:
-        dict with keys: label, val_tokens, val_ppl, val_loss, val_bpc,
+        dict with keys: label, val_tokens, val_ppl, val_loss, val_bpb,
                         train_tokens, train_ppl, params (if inferable)
     """
     path = os.path.join(run_dir, "metrics.jsonl")
@@ -62,7 +62,7 @@ def load_cortex_run(label: str, run_dir: str):
         print(f"  WARNING: {path} not found — skipping {label!r}")
         return None
 
-    val_tokens, val_ppl, val_loss, val_bpc = [], [], [], []
+    val_tokens, val_ppl, val_loss, val_bpb = [], [], [], []
     train_tokens, train_ppl = [], []
 
     with open(path) as f:
@@ -76,7 +76,7 @@ def load_cortex_run(label: str, run_dir: str):
                 val_tokens.append(t)
                 val_ppl.append(r.get("val/perplexity", np.exp(r["val/loss"])))
                 val_loss.append(r["val/loss"])
-                val_bpc.append(r.get("val/bpc", float("nan")))
+                val_bpb.append(r.get("val/bpb", r.get("val/bpc", float("nan"))))
             elif "train/loss" in r:
                 train_tokens.append(t)
                 train_ppl.append(r.get("train/perplexity", np.exp(r["train/loss"])))
@@ -93,7 +93,7 @@ def load_cortex_run(label: str, run_dir: str):
         val_tokens=np.array([t if t is not None else i for i, t in enumerate(val_tokens)]),
         val_ppl=np.array(val_ppl),
         val_loss=np.array(val_loss),
-        val_bpc=np.array(val_bpc),
+        val_bpb=np.array(val_bpb),
         train_tokens=np.array([t if t is not None else i for i, t in enumerate(train_tokens)]),
         train_ppl=np.array(train_ppl),
         params=params,

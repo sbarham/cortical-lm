@@ -122,7 +122,7 @@ DEFAULT_CONFIG = {
         "log_spike_rates": True,
         # Periodic text samples during training (0 = disabled)
         "sample_interval": 2000,
-        "sample_tokens": 150,
+        "sample_max_tokens": 150,
         "sample_top_p": 0.9,
         "sample_temperature": 0.8,
         "sample_prompt": "",      # empty = random start token from vocab

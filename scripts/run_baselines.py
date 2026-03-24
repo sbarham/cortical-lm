@@ -75,6 +75,17 @@ def _make_baseline(name, vocab_size, embed_dim, hidden_size, n_layers, seq_len):
     raise ValueError(name)
 
 
+def _resolve_interval(config: dict, key_tokens: str, key_steps: str, default_steps: int) -> int:
+    tcfg = config["training"]
+    lcfg = config.get("logging", {})
+    token_val = tcfg.get(key_tokens) or lcfg.get(key_tokens)
+    if token_val is not None:
+        batch_size = tcfg.get("batch_size", 32)
+        seq_len    = config.get("data", {}).get("seq_len", 128)
+        return max(1, int(token_val) // (batch_size * seq_len))
+    return tcfg.get(key_steps) or lcfg.get(key_steps, default_steps)
+
+
 def train_baseline(model, name, train_loader, val_loader, config, device, results_log, logger=None):
     """Train one baseline model and log perplexity vs tokens."""
     model = model.to(device)
@@ -95,7 +106,8 @@ def train_baseline(model, name, train_loader, val_loader, config, device, result
     tokens_seen = 0
     step = 0
     train_iter = iter(train_loader)
-    eval_interval = tcfg["eval_interval"]
+    eval_interval = _resolve_interval(config, "eval_tokens", "eval_interval", 500)
+    log_interval  = _resolve_interval(config, "log_tokens",  "log_interval",  100)
 
     while step < max_steps:
         try:
@@ -123,13 +135,24 @@ def train_baseline(model, name, train_loader, val_loader, config, device, result
         else:
             scheduler.step()
 
+        if step % log_interval == 0:
+            train_ppl = compute_perplexity(loss.item())
+            lr = optimizer.param_groups[0]["lr"]
+            if logger:
+                logger.log({
+                    "train/perplexity": train_ppl,
+                    "train/loss": loss.item(),
+                    "lr": lr,
+                    "tokens": tokens_seen,
+                }, step=step)
+
         if step % eval_interval == 0:
             model.eval()
             val_loss = 0.0
             n = 0
             with torch.no_grad():
                 for i, (xv, yv) in enumerate(val_loader):
-                    if i >= 20:
+                    if i >= 50:
                         break
                     xv, yv = xv.to(device), yv.to(device)
                     lv, _ = model(xv)
@@ -173,11 +196,19 @@ def main():
                         help="Path to a saved tokenizer.pkl (skips BPE retraining)")
     parser.add_argument("--wandb", action="store_true",
                         help="Enable Weights & Biases logging (overrides config)")
+    parser.add_argument("--wandb-project", default=None,
+                        help="W&B project name (overrides config)")
+    parser.add_argument("--wandb-group", default=None,
+                        help="W&B run group — use same group as canonical runs to overlay curves")
     args = parser.parse_args()
 
     config = get_config(args.config)
     if args.wandb:
         config.setdefault("logging", {})["wandb"] = True
+    if args.wandb_project:
+        config.setdefault("logging", {})["project"] = args.wandb_project
+    if args.wandb_group:
+        config.setdefault("logging", {})["group"] = args.wandb_group
     setup_logging()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

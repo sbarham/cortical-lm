@@ -39,7 +39,9 @@ python -m pytest tests/ -q
 | `configs/phase1b_layered.yaml` | 1b | + Layered cortical columns (L4/L2-3/L5/L6). |
 | `configs/phase1c_stp.yaml` | 1c | + Tsodyks-Markram STP synapses. |
 | `configs/phase1d_adex.yaml` | 1d | + AdEx adaptive neuron dynamics. |
-| `configs/phase1e_hopfield.yaml` | 1e | + Modern Hopfield hippocampal module. Full system on TinyStories. |
+| `configs/phase1e_disinhibition.yaml` | 1e | + VIP→SST→PC disinhibition circuit. Completes cortical column. |
+| `configs/phase1e_hopfield.yaml` | (exploratory) | Hopfield + AdEx, used for apical pathway factorial. |
+| `configs/phase1f_hopfield.yaml` | 1f | + Modern Hopfield hippocampal module. Full system on TinyStories. |
 | `configs/standard_wikitext103.yaml` | 2 | Full system trained on Wikitext-103. |
 | `configs/bioplausible_tinystories.yaml` | 3a | e-prop learning rule, TinyStories. |
 | `configs/bioplausible_wikitext103.yaml` | 3b | e-prop learning rule, Wikitext-103. |
@@ -521,6 +523,85 @@ Note: the fan-in dependent synapse init (`softplus_inv(1/n_pre)`) lives in the s
 
 ---
 
+### LR schedule bug (affects all pre-canonical runs)
+
+**Bug:** `scheduler.step()` was called once **per truncated-BPTT chunk**, not once per training step. With `truncated_bptt_k=32` and `seq_len=128` there are 4 chunks per step, so the cosine schedule cycled 4× too fast — completing at step ~975 and restarting. The LR never decayed to zero; it bounced back to `lr_max` repeatedly. Warmup also ended after 25 training steps instead of 100.
+
+**Symptom:** terminal `lr` values near 3e-4 (= `lr_max`) at the end of runs that should have decayed to ~0.
+
+**Fix:** removed `_warmup_lr()`, `scheduler.step()`, and `step_count += 1` from inside `_truncated_bptt`; moved them to the outer `train()` loop so they fire exactly once per training step.
+
+**Impact:** all phase 1a–1e results above are non-canonical. Canonical reruns pending.
+
+---
+
+### Phase 1e + apical pathway factorial (exploratory, post-fix)
+
+Four apical variants run on `phase1e_hopfield.yaml` (Hopfield + AdEx, batch=1024, 4000 steps).
+
+#### Variant A — skip
+
+**Result at step 1900 (47% done):** val ppl = **28.66** — already better than the *final* result of the broken-LR 1e run (36.19 at step 3900). Run stopped intentionally.
+
+**Gradient signature:** `l23_to_l5` collapsed to ~0.013 vs `readout` ~2.0 (ratio ~150×). The skip pathway provides a direct gradient highway from readout → thalamic input, bypassing L23→L5. Analogous to the transformer residual stream.
+
+---
+
+#### Variant B — additive (sigmoid gate)
+
+Crashed at step 2330 with `CUDA error: unknown error` (hardware glitch, not a code bug). Last checkpoint: step 2250, val ppl ≈ 28–29.
+
+**Gradient signature:** `l23_to_l5` healthy at ~0.5–1.0 throughout — both the apical and recurrent pathways carry meaningful gradient. Gate mean grew from ~0.05 (near-silent at init) to ~0.3–0.4, showing the pathway gradually opened during training.
+
+---
+
+#### Variant C — multiplicative (Larkum calcium spike)
+
+`I_l5e_out = I_l5e × (1 + tanh(apical_proj(embed)))`. Weights init near zero → identity at start.
+
+**Results (selected):**
+
+| Step | val_ppl | val_bpb | HPC entropy | L5e τ_eff |
+|---|---|---|---|---|
+| 0 | 2699 | 2.16 | 4.16 | 9.9 |
+| 500 | 56.9 | 1.10 | 2.46 | 14.6 |
+| 1000 | 40.3 | 1.01 | 1.99 | 15.2 |
+| 1500 | 33.9 | 0.963 | 1.86 | 15.7 |
+| 2000 | 30.9 | 0.937 | 1.74 | 16.3 |
+| 2200 | 30.0 | 0.929 | 1.69 | — |
+
+NLL–H gap crossed zero at step ~1500 (calibration). HPC entropy declining monotonically (memory consolidation). L5e τ_eff growing throughout (~9 → 16+) — network learns to exploit slow timescales.
+
+---
+
+#### Variant D — corticortical
+
+Previous-timestep L5E of column (k+1)%n feeds back to L23E of column k. Circular inter-column hierarchy.
+
+**Results (selected):**
+
+| Step | val_ppl | val_bpb | HPC entropy | l4_to_l23 grad |
+|---|---|---|---|---|
+| 0 | 2841 | 2.17 | 4.16 | 2.87e-04 |
+| 200 | 200.8 | 1.45 | **0.12** | 1.64e-03 |
+| 500 | 80.1 | 1.20 | 1.22 | 4.37e-03 |
+| 1000 | 50.1 | 1.07 | 2.02 | 7.04e-03 |
+| 1500 | 41.2 | 1.02 | 2.39 | 3.70e-03 |
+| 2000 | 37.0 | 0.987 | 2.51 | 4.03e-03 |
+| 2200 | 36.2 | 0.981 | 2.52 | 2.97e-03 |
+
+**Key findings:**
+- `l4_to_l23` gradient ~10× smaller than in A/B/C throughout. The corticortical input dominates L23, suppressing the feedforward L4→L23 pathway. This inverts the canonical cortical hierarchy — L23 driven more by top-down than bottom-up.
+- **HPC early collapse:** attn_entropy crashed to 0.12 at step 200 (attn_max=0.98 — single memory dominates). Then slowly recovered to ~2.5 over the remainder. Unique to this variant; caused by the circular L5E→L23E→…→L5E resonance loop creating a strong attractor at init.
+- Convergence significantly slower than A/B/C. Estimated final ppl ~33–35 vs ~27–29 for the others.
+- Interpretation: *where* the apical signal enters the column matters. Signals into L5 (A/B/C) help; signals into L23 (D) interfere with feedforward credit assignment.
+
+---
+
+**Confounds common to all exploratory runs:** (1) batch=1024 vs canonical batch=512; (2) apical pathway not independently ablated from HPC. Need clean canonical runs (no apical, fixed LR) to separate contributions.
+
+---
+
 ## Open research questions
 
 Two fundamental problems motivate this project beyond the immediate ablation
@@ -618,20 +699,46 @@ architecture's inductive biases front and centre.
 
 A running list of directions worth exploring once the current ablation series is complete.
 
-### Larkum two-compartment L5 / apical dendritic pathway *(priority)*
+### Larkum two-compartment L5 / apical dendritic pathway *(implemented and run)*
 
 L5 pyramidal neurons in real cortex have two functionally distinct input zones: basal dendrites in L5 (receiving local feedforward input from L2/3) and apical dendrites extending all the way to L1 (receiving top-down feedback from higher areas). The two zones interact nonlinearly — strong apical depolarisation triggers a dendritic calcium spike that dramatically amplifies somatic output (Larkum 2013). This is the likely biological analogue of the residual stream in transformers: it provides a gradient highway and a meaningful output even when the intermediate processing layers are not yet trained.
 
-The current architecture has no apical pathway. Three implementation variants, in order of complexity:
+The apical pathway is implemented in `cortexlm/columns/apical.py` (`ApicalPathway` module). Activated via a single config flag:
 
-| Variant | Config flag | Description |
+```yaml
+column:
+  apical_pathway: skip          # or: additive | multiplicative | corticortical | none (default)
+```
+
+| Variant | `apical_pathway` value | Description |
 |---|---|---|
-| A | `apical: skip` | Direct embedding → L5E additive projection (skip connection / thalamic bypass) |
-| B | `apical: additive` | L5 integrates `v_basal + α·v_apical`; apical input from HPC output or embedding |
-| C | `apical: multiplicative` | Full Larkum model: `v_basal · (1 + gate(v_apical))`; calcium spike nonlinearity |
-| D | `apical: corticortical` | L5E of column k projects to L23E of columns 0..k-1 (full top-down feedback hierarchy) |
+| A | `skip` | Direct embedding → L5E additive projection (skip connection / thalamic bypass). Simplest gradient highway. |
+| B | `additive` | Embedding → L5E projection with a learned per-neuron sigmoid gate (init ≈ 0.05, so pathway opens gradually). |
+| C | `multiplicative` | Full Larkum calcium spike: `I_l5e · (1 + tanh(apical_proj))`. Gating is multiplicative, not additive. |
+| D | `corticortical` | Previous-timestep L5E of column k+1 feeds into L23E of column k — circular top-down inter-column feedback. |
 
-The plan is to implement `apical_pathway` as a config flag and run it **across all model variants (1a–1e)** as an independent ablation axis — a 2×N factorial that isolates the contribution of top-down feedback from STP, AdEx, and HPC. This would be a paper section on its own.
+#### Exploratory results (Hopfield + AdEx, batch=1024, ~524M tokens)
+
+All four variants run on `phase1e_hopfield.yaml` (Hopfield + AdEx, 8 columns). Results at the canonical token budget:
+
+| Variant | val_ppl @2200 steps (55%) | Gradient signature | HPC behaviour |
+|---|---|---|---|
+| A (skip) | ~28.7 (stopped @1900) | `l23_to_l5` collapses to ~0.01 (gradient highway dominates) | Entropy: 4.16 → 1.7, monotone |
+| B (additive) | ~29 (crashed @2330) | `l23_to_l5` healthy ~0.5–1.0; both pathways active | Entropy: 4.16 → 1.8, monotone |
+| C (multiplicative) | 29.95 | `l23_to_l5` healthy ~0.4–0.8; slower convergence | Entropy: 4.16 → 1.7, monotone |
+| D (corticortical) | 36.24 | `l4_to_l23` near-zero (~0.003); feedforward starved | Entropy collapsed to 0.12 @step 200, then recovered to ~2.5 |
+
+**Key findings:**
+
+1. **Gradient routing matters.** Variants A/B/C (apical → L5) all improve on the no-apical baseline and maintain healthy gradient flow through the column. Variant D (apical → L23) suppresses the L4→L23 feedforward gradient 10× — the corticortical signal dominates L23 input and starves the feedforward pathway.
+
+2. **Hopfield early collapse in D.** The circular L5E→L23E→…→L5E resonance loop caused the Hopfield memory bank to collapse onto a single pattern by step 200 (`attn_entropy = 0.12`, `attn_max = 0.98`). The bank then slowly diversified over the remaining training. Variants A/B/C showed the opposite: gradual consolidation (monotonically decreasing entropy) as the network discovered which memories were useful.
+
+3. **Calibration (NLL–H gap).** Variants B and C crossed zero (well-calibrated) around step 1500. Variant D remained negative (underconfident) throughout — consistent with its slower convergence.
+
+4. **L5e effective timescales grow during training** (τ_eff: 9 → 15–18 steps in A/B/C). The network learns to exploit the heterogeneous timescale distribution. Variant D shows less growth — suggesting inter-column synchrony rather than within-column temporal integration.
+
+The planned canonical experiment is a **factorial ablation**: each of the 4 apical variants on top of each phase-1 config (1a–1f), keeping everything else fixed.
 
 ### Neuron-level sparse connectivity
 Currently the weight matrices *within* each column (E→E, E→I, I→E) are fully dense. Biological cortex has ~10% connection probability between any two nearby neurons. A sparse intra-column weight matrix — implemented as a learned dense matrix multiplied elementwise by a fixed random binary mask — would be more faithful and would reduce intra-column parameter count substantially, potentially allowing larger columns at the same budget. The existing `gaussian_1d` / `small_world` connectivity only controls which *column pairs* communicate, not which individual neurons within a pair are wired.
@@ -645,7 +752,7 @@ The current model has only one inhibitory population (I) per layer. Real cortex 
 - **SST (somatostatin)** — targets dendrites; implements multiplicative gating
 - **VIP** — inhibits SST (disinhibition), enabling top-down modulation
 
-The `disinhibition` flag in column config is a placeholder for the VIP→SST→PC circuit. Expanding to three I populations per layer would enable richer gating dynamics at modest parameter cost.
+The `disinhibition` flag activates the VIP→SST→PC circuit (implemented in `BatchedLayeredColumns`): a VIP population (n_vip = n_i // 2) per layer receives excitatory input from the E population and inhibits the SST (I) population, thereby disinhibiting the pyramidal cells. This is Phase 1e in the canonical sequence. Expanding to fully separate PV/SST/VIP populations would enable richer gating dynamics at modest parameter cost.
 
 ### Learnable timescales
 `learn_taus: true` is already wired in but disabled. Allowing τ_m and τ_w to be learned (rather than fixed from a log-normal draw) would let the model discover which timescales are useful for the task. Worth enabling once the architectural ablations are done, to see whether gradient descent recovers biologically plausible timescale distributions.

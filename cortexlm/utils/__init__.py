@@ -1,2 +1,2 @@
 from .config import get_config, get_default_config
-from .metrics import compute_perplexity, compute_bpc
+from .metrics import compute_perplexity, compute_bpt, compute_bpb, compute_bpc

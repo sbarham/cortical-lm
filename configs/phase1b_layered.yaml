@@ -57,15 +57,15 @@ learning:
 
 training:
   batch_size: 512
-  max_tokens: 524_288_000   # canonical Phase 1 budget; steps auto-scale with batch_size
+  max_tokens: 1_000_000_000   # canonical Phase 1 budget; steps auto-scale with batch_size
   lr: 3.0e-4
   weight_decay: 1.0e-4
   grad_clip: 1.0
   optimizer: adamw
   scheduler: cosine
   warmup_steps: 100
-  eval_interval: 200
-  checkpoint_interval: 500
+  eval_tokens: 1_638_400    # every 200 steps @ batch=512 — auto-scales with batch_size
+  checkpoint_tokens: 32_768_000  # every 500 steps @ batch=512 — auto-scales with batch_size
   seed: 42
 
 simulation:
@@ -73,4 +73,4 @@ simulation:
 
 logging:
   wandb: false
-  log_interval: 100
+  log_tokens: 1_638_400      # every 100 steps @ batch=512 — auto-scales with batch_size

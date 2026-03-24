@@ -1,8 +1,8 @@
-# Phase 1e: full bio-plausible architecture on TinyStories — adds Modern Hopfield hippocampus.
+# Phase 1f: full bio-plausible architecture on TinyStories — adds Modern Hopfield hippocampus.
+# Extends phase1e_disinhibition: hippocampus on, disinhibition on.
 # Complete ablation endpoint before moving to wikitext103.
-# Single variable change vs phase1d_adex: hippocampus on.
 
-name: cortex-lm-phase1e-hopfield
+name: cortex-lm-phase1f-hopfield
 version: "0.1"
 
 data:
@@ -31,7 +31,9 @@ synapse:
 column:
   model: layered
   n_columns: 8
-  disinhibition: false
+  disinhibition: true         # VIP→SST→PC disinhibition circuit (from 1e)
+  apical_pathway: additive    # variant B — best gradient health in factorial study
+                              # swap to multiplicative if variant C edges ahead on full run
   layer_sizes:
     l4:  {n_e: 16, n_i: 4}
     l23: {n_e: 32, n_i: 8}
@@ -45,7 +47,7 @@ connectivity:
 
 hippocampus:
   model: modern_hopfield
-  n_memories: 64        # small memory bank — keeps param overhead minimal at Phase 1 scale
+  n_memories: 64
   d_model: 64
   beta: 1.0
   ca1: false
@@ -65,15 +67,15 @@ learning:
 
 training:
   batch_size: 512
-  max_tokens: 524_288_000   # canonical Phase 1 budget; steps auto-scale with batch_size
+  max_tokens: 1_000_000_000   # canonical Phase 1 budget
   lr: 3.0e-4
   weight_decay: 1.0e-4
   grad_clip: 1.0
   optimizer: adamw
   scheduler: cosine
   warmup_steps: 100
-  eval_tokens: 13_107_200    # every 200 steps @ batch=512 � auto-scales with batch_size
-  checkpoint_tokens: 32_768_000  # every 500 steps @ batch=512 � auto-scales with batch_size
+  eval_tokens: 1_638_400
+  checkpoint_tokens: 32_768_000
   seed: 42
 
 simulation:
@@ -81,7 +83,7 @@ simulation:
 
 logging:
   wandb: false
-  log_tokens: 6_553_600      # every 100 steps @ batch=512 � auto-scales with batch_size
+  log_tokens: 1_638_400
   log_weight_stats: true
   log_tau_stats: true
   log_spike_rates: true

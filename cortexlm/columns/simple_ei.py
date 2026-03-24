@@ -5,6 +5,7 @@ import torch.nn as nn
 from typing import Dict, List
 
 from .base import CorticalColumn
+from .apical import ApicalPathway
 from cortexlm.neurons import get_neuron_population, BatchedNeuronPop
 from cortexlm.synapses.static import StaticSynapse, BatchedStaticSynapse
 
@@ -153,6 +154,19 @@ class BatchedSimpleEIColumns(nn.Module):
         self.input_proj    = nn.Parameter(torch.randn(n_cols, self.n_e, embed_dim)  * (1.0 / _math.sqrt(embed_dim)))
         self.feedback_proj = nn.Parameter(torch.randn(n_cols, self.n_e, self.n_e)  * (1.0 / _math.sqrt(self.n_e)))
 
+        # ── Optional apical pathway ───────────────────────────────────────────
+        apical_mode = config["column"].get("apical_pathway", "none")
+        if apical_mode != "none":
+            # For simple_ei: E population serves as both L5 and L23 analogue
+            self.apical = ApicalPathway(
+                config, n_cols, embed_dim,
+                n_apical_target=self.n_e,
+                n_cortical_l23=self.n_e,
+                n_cortical_l5=self.n_e,
+            )
+        else:
+            self.apical = None
+
     # ── forward ──────────────────────────────────────────────────────────────
 
     def forward(
@@ -184,6 +198,17 @@ class BatchedSimpleEIColumns(nn.Module):
         I_ie = self.syn_ie(z0e, r_i)   # [batch, n_cols, n_e]
 
         I_e_total = I_ext + I_ee + I_ie
+
+        # Apical pathway (all variants feed into E population for simple_ei)
+        if self.apical is not None:
+            apical_add = self.apical.l5_additive(thal_full)
+            if apical_add is not None:
+                I_e_total = I_e_total + apical_add
+            I_e_total = self.apical.l5_multiplicative(I_e_total, thal_full)
+            cortico = self.apical.l23_corticortical(state["r_e"])
+            if cortico is not None:
+                I_e_total = I_e_total + cortico
+
         I_i_total = I_ei
 
         state_e = {k: state[f"e_{k}"] for k in self.pop_e.state_keys()}

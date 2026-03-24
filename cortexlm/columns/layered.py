@@ -5,6 +5,7 @@ import torch.nn as nn
 from typing import Dict, List
 
 from .base import CorticalColumn
+from .apical import ApicalPathway
 from cortexlm.neurons import get_neuron_population, BatchedNeuronPop
 from cortexlm.synapses.static import StaticSynapse, BatchedStaticSynapse
 
@@ -317,7 +318,55 @@ class BatchedLayeredColumns(nn.Module):
         self.syn_l6e_l4e   = BatchedStaticSynapse(n_cols, self.n_l6e,  0, self.n_l4e)
         self.syn_l6e_l4i   = BatchedStaticSynapse(n_cols, self.n_l6e,  0, self.n_l4i)
 
+        # ── Optional apical pathway ───────────────────────────────────────────
+        apical_mode = config["column"].get("apical_pathway", "none")
+        if apical_mode != "none":
+            self.apical = ApicalPathway(
+                config, n_cols, embed_dim,
+                n_apical_target=self.n_l5e,
+                n_cortical_l23=self.n_l23e,
+                n_cortical_l5=self.n_l5e,
+            )
+        else:
+            self.apical = None
+
+        # ── Optional VIP disinhibition circuit (VIP→SST→PC) ──────────────────
+        # VIP interneurons receive excitatory drive from E neurons in their layer,
+        # and inhibit the SST (I) population, thereby disinhibiting pyramidal cells.
+        # n_vip ≈ n_i // 2 per layer (VIP is a minority interneuron subtype).
+        self.disinhibition = ccfg.get("disinhibition", False)
+        if self.disinhibition:
+            self.n_l4vip  = max(1, self.n_l4i  // 2)
+            self.n_l23vip = max(1, self.n_l23i // 2)
+            self.n_l5vip  = max(1, self.n_l5i  // 2)
+            self.n_l6vip  = max(1, self.n_l6i  // 2)
+
+            # VIP populations (one per layer)
+            self.l4_vip  = _pop(self.n_l4vip)
+            self.l23_vip = _pop(self.n_l23vip)
+            self.l5_vip  = _pop(self.n_l5vip)
+            self.l6_vip  = _pop(self.n_l6vip)
+
+            # E→VIP: excitatory drive to VIP from local E population
+            self.syn_l4_e_vip  = BatchedStaticSynapse(n_cols, self.n_l4e,  0, self.n_l4vip)
+            self.syn_l23_e_vip = BatchedStaticSynapse(n_cols, self.n_l23e, 0, self.n_l23vip)
+            self.syn_l5_e_vip  = BatchedStaticSynapse(n_cols, self.n_l5e,  0, self.n_l5vip)
+            self.syn_l6_e_vip  = BatchedStaticSynapse(n_cols, self.n_l6e,  0, self.n_l6vip)
+
+            # VIP→SST: VIP inhibits local SST (I) population (inhibitory synapse)
+            self.syn_l4_vip_sst  = BatchedStaticSynapse(n_cols, 0, self.n_l4vip,  self.n_l4i)
+            self.syn_l23_vip_sst = BatchedStaticSynapse(n_cols, 0, self.n_l23vip, self.n_l23i)
+            self.syn_l5_vip_sst  = BatchedStaticSynapse(n_cols, 0, self.n_l5vip,  self.n_l5i)
+            self.syn_l6_vip_sst  = BatchedStaticSynapse(n_cols, 0, self.n_l6vip,  self.n_l6i)
+
     # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _update_vip(self, pop_vip, I_vip, state, prefix):
+        """Update a VIP interneuron population.  Returns (r_vip_new, out_state)."""
+        state_vip = {k: state[f"{prefix}_vip_{k}"] for k in pop_vip.state_keys()}
+        r_vip_new, ns_vip = pop_vip(I_vip, state_vip)
+        out_state = {f"{prefix}_vip_{k}": v for k, v in ns_vip.items()}
+        return r_vip_new, out_state
 
     def _update_layer(self, pop_e, pop_i, I_e, I_i, state, prefix):
         """Neuron update for one layer.  I_e/I_i: [batch, n_cols, n]."""
@@ -365,6 +414,13 @@ class BatchedLayeredColumns(nn.Module):
                  + self.syn_l4_ei(r_l4e,  z0(batch, n_cols, 0))
                  + self.syn_l6e_l4i(r_l6e, z0(batch, n_cols, 0)))
 
+        if self.disinhibition:
+            # VIP driven by prev-step L4 E; fires this step to inhibit L4 SST
+            r_l4vip = state["r_l4vip"]
+            I_l4_vip = self.syn_l4_e_vip(r_l4e, z0(batch, n_cols, 0))
+            r_l4vip_new, ns_l4vip = self._update_vip(self.l4_vip, I_l4_vip, state, "l4")
+            I_l4i = I_l4i + self.syn_l4_vip_sst(z0(batch, n_cols, 0), r_l4vip)
+
         r_l4e_new, r_l4i_new, ns_l4 = self._update_layer(
             self.l4_e, self.l4_i, I_l4e, I_l4i, state, "l4")
 
@@ -375,6 +431,18 @@ class BatchedLayeredColumns(nn.Module):
                   + torch.einsum("bce,coe->bco", l23_fb, self.fb_proj_w))
         I_l23i = (self.syn_l4e_l23i(r_l4e_new,  z0(batch, n_cols, 0))
                   + self.syn_l23_ei(r_l23e,      z0(batch, n_cols, 0)))
+
+        # Corticortical: previous-timestep L5E of col (k+1) → L23E of col k
+        if self.apical is not None:
+            cortico = self.apical.l23_corticortical(r_l5e)
+            if cortico is not None:
+                I_l23e = I_l23e + cortico
+
+        if self.disinhibition:
+            r_l23vip = state["r_l23vip"]
+            I_l23_vip = self.syn_l23_e_vip(r_l23e, z0(batch, n_cols, 0))
+            r_l23vip_new, ns_l23vip = self._update_vip(self.l23_vip, I_l23_vip, state, "l23")
+            I_l23i = I_l23i + self.syn_l23_vip_sst(z0(batch, n_cols, 0), r_l23vip)
 
         r_l23e_new, r_l23i_new, ns_l23 = self._update_layer(
             self.l23_e, self.l23_i, I_l23e, I_l23i, state, "l23")
@@ -387,6 +455,19 @@ class BatchedLayeredColumns(nn.Module):
         I_l5i = (self.syn_l23e_l5i(r_l23e_new,  z0(batch, n_cols, 0))
                  + self.syn_l5_ei(r_l5e,         z0(batch, n_cols, 0)))
 
+        # Apical pathway: embed → L5E (skip / additive / multiplicative)
+        if self.apical is not None:
+            apical_add = self.apical.l5_additive(thal_full)
+            if apical_add is not None:
+                I_l5e = I_l5e + apical_add
+            I_l5e = self.apical.l5_multiplicative(I_l5e, thal_full)
+
+        if self.disinhibition:
+            r_l5vip = state["r_l5vip"]
+            I_l5_vip = self.syn_l5_e_vip(r_l5e, z0(batch, n_cols, 0))
+            r_l5vip_new, ns_l5vip = self._update_vip(self.l5_vip, I_l5_vip, state, "l5")
+            I_l5i = I_l5i + self.syn_l5_vip_sst(z0(batch, n_cols, 0), r_l5vip)
+
         r_l5e_new, r_l5i_new, ns_l5 = self._update_layer(
             self.l5_e, self.l5_i, I_l5e, I_l5i, state, "l5")
 
@@ -397,6 +478,12 @@ class BatchedLayeredColumns(nn.Module):
                  + self.syn_l6_ie(z0(batch, n_cols, 0), r_l6i))
         I_l6i = (self.syn_l5e_l6i(r_l5e_new,   z0(batch, n_cols, 0))
                  + self.syn_l6_ei(r_l6e,         z0(batch, n_cols, 0)))
+
+        if self.disinhibition:
+            r_l6vip = state["r_l6vip"]
+            I_l6_vip = self.syn_l6_e_vip(r_l6e, z0(batch, n_cols, 0))
+            r_l6vip_new, ns_l6vip = self._update_vip(self.l6_vip, I_l6_vip, state, "l6")
+            I_l6i = I_l6i + self.syn_l6_vip_sst(z0(batch, n_cols, 0), r_l6vip)
 
         r_l6e_new, r_l6i_new, ns_l6 = self._update_layer(
             self.l6_e, self.l6_i, I_l6e, I_l6i, state, "l6")
@@ -411,6 +498,15 @@ class BatchedLayeredColumns(nn.Module):
         new_state.update(ns_l23)
         new_state.update(ns_l5)
         new_state.update(ns_l6)
+        if self.disinhibition:
+            new_state["r_l4vip"]  = r_l4vip_new
+            new_state["r_l23vip"] = r_l23vip_new
+            new_state["r_l5vip"]  = r_l5vip_new
+            new_state["r_l6vip"]  = r_l6vip_new
+            new_state.update(ns_l4vip)
+            new_state.update(ns_l23vip)
+            new_state.update(ns_l5vip)
+            new_state.update(ns_l6vip)
 
         layer_outputs = {
             "l23_out": r_l23e_new,
@@ -435,4 +531,14 @@ class BatchedLayeredColumns(nn.Module):
                 state[f"{prefix}_e_{k}"] = v
             for k, v in pop_i.init_state(batch_size).items():
                 state[f"{prefix}_i_{k}"] = v
+        if self.disinhibition:
+            for prefix, pop_vip, n_vip in [
+                ("l4",  self.l4_vip,  self.n_l4vip),
+                ("l23", self.l23_vip, self.n_l23vip),
+                ("l5",  self.l5_vip,  self.n_l5vip),
+                ("l6",  self.l6_vip,  self.n_l6vip),
+            ]:
+                state[f"r_{prefix}vip"] = torch.zeros(batch_size, n_cols, n_vip, device=device)
+                for k, v in pop_vip.init_state(batch_size).items():
+                    state[f"{prefix}_vip_{k}"] = v
         return state

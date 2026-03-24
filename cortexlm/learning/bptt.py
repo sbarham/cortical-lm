@@ -9,7 +9,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR
 from typing import Optional, Tuple
 
 from cortexlm.model import CortexLM, ModelState
-from cortexlm.utils.metrics import compute_perplexity, compute_bpc
+from cortexlm.utils.metrics import compute_perplexity, compute_bpt, compute_bpb, compute_effective_timescales
 
 
 def _resolve_max_steps(config: dict) -> int:
@@ -23,6 +23,24 @@ def _resolve_max_steps(config: dict) -> int:
               f"(batch={batch_size}, seq_len={seq_len})")
         return steps
     return tcfg.get("max_steps", 100_000)
+
+
+def _resolve_interval(config: dict, key_tokens: str, key_steps: str, default_steps: int) -> int:
+    """Return a step interval, deriving from a token count if the _tokens key is set.
+
+    Keeps logging/eval/checkpoint frequency proportional to data seen rather than
+    number of optimizer steps, so runs with different batch sizes produce the same
+    number of log/eval/checkpoint events.
+    """
+    tcfg = config["training"]
+    lcfg = config.get("logging", {})
+    # Check training section first, then logging section
+    token_val = tcfg.get(key_tokens) or lcfg.get(key_tokens)
+    if token_val is not None:
+        batch_size = tcfg.get("batch_size", 32)
+        seq_len    = config.get("data", {}).get("seq_len", 128)
+        return max(1, int(token_val) // (batch_size * seq_len))
+    return tcfg.get(key_steps) or lcfg.get(key_steps, default_steps)
 
 
 class BPTTTrainer:
@@ -40,6 +58,9 @@ class BPTTTrainer:
         self.model = model
         self.config = config
         self.tokenizer = tokenizer  # optional; enables periodic text samples
+        self._avg_bytes_per_token = (
+            tokenizer.avg_bytes_per_token() if tokenizer is not None else 1.0
+        )
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = self.model.to(self.device)
 
@@ -93,20 +114,41 @@ class BPTTTrainer:
         """
         Collect gradient norms for key parameters along the credit-assignment path.
         Returns a dict of {label: norm} for logging.  Skips any parameter that
-        doesn't exist or has no grad (e.g. simple_ei model vs layered).
+        doesn't exist or has no grad (e.g. simple_ei model vs layered, apical absent).
         """
         cols = self.model.columns
+        apical = getattr(cols, "apical", None)
+
         candidates = {
-            "grad/thal_input":  getattr(cols, "thal_proj_e_w", None),
-            "grad/l4_to_l23":   getattr(getattr(cols, "syn_l4e_l23e", None), "W_e_raw", None),
-            "grad/l23_to_l5":   getattr(getattr(cols, "syn_l23e_l5e", None), "W_e_raw", None),
-            "grad/input_proj":  getattr(cols, "input_proj", None),   # simple_ei fallback
-            "grad/readout":     next(iter(self.model.readout.parameters()), None),
+            # ── Thalamic / feedforward input ──────────────────────────────────
+            "grad/thal_input":      getattr(cols, "thal_proj_e_w", None),
+            "grad/input_proj":      getattr(cols, "input_proj", None),   # simple_ei fallback
+            # ── Inter-layer feedforward chain ─────────────────────────────────
+            "grad/l4_to_l23":       getattr(getattr(cols, "syn_l4e_l23e",  None), "W_e_raw", None),
+            "grad/l23_to_l5":       getattr(getattr(cols, "syn_l23e_l5e",  None), "W_e_raw", None),
+            # ── Feedback loop: L5 → L6 → L4 ──────────────────────────────────
+            "grad/l5_to_l6":        getattr(getattr(cols, "syn_l5e_l6e",   None), "W_e_raw", None),
+            "grad/l6_to_l4":        getattr(getattr(cols, "syn_l6e_l4e",   None), "W_e_raw", None),
+            # ── Within-L4 recurrent ───────────────────────────────────────────
+            "grad/l4_recurrent":    getattr(getattr(cols, "syn_l4_ee",     None), "W_e_raw", None),
+            # ── Readout ───────────────────────────────────────────────────────
+            "grad/readout":         next(iter(self.model.readout.parameters()), None),
+            # ── Apical pathway (present only when apical_pathway != none) ─────
+            "grad/apical_proj":     getattr(apical, "l5_proj",    None),
+            "grad/apical_gate":     getattr(apical, "apical_gate", None),
+            "grad/apical_l5_to_l23":getattr(apical, "l5_to_l23",  None),
         }
         norms = {}
         for label, param in candidates.items():
             if param is not None and param.grad is not None:
                 norms[label] = param.grad.norm().item()
+
+        # ── Apical forward stats (parameter reads, no backward needed) ────────
+        if apical is not None and getattr(apical, "variant", "none") == "additive":
+            gate_vals = torch.sigmoid(apical.apical_gate).detach()
+            norms["apical/gate_mean"] = gate_vals.mean().item()
+            norms["apical/gate_std"]  = gate_vals.std().item()
+
         return norms
 
     def train_step(
@@ -148,10 +190,6 @@ class BPTTTrainer:
             nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
         self.optimizer.step()
         self._enforce_dale()
-        self._warmup_lr()
-        if self.scheduler and self.step_count >= self.warmup_steps:
-            self.scheduler.step()
-        self.step_count += 1
         return loss.item(), new_state.detach()
 
     def _truncated_bptt(self, x, y, state):
@@ -178,10 +216,6 @@ class BPTTTrainer:
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
             self.optimizer.step()
             self._enforce_dale()
-            self._warmup_lr()
-            if self.scheduler and self.step_count >= self.warmup_steps:
-                self.scheduler.step()
-            self.step_count += 1
 
             state = state.detach()
             total_loss += loss.item()
@@ -193,12 +227,12 @@ class BPTTTrainer:
         """Full training loop."""
         from tqdm import tqdm
         tcfg = self.config["training"]
-        max_steps = _resolve_max_steps(self.config)
-        eval_interval = tcfg.get("eval_interval", 500)
-        ckpt_interval = tcfg.get("checkpoint_interval", 5000)
+        max_steps    = _resolve_max_steps(self.config)
+        eval_interval = _resolve_interval(self.config, "eval_tokens",       "eval_interval",       500)
+        ckpt_interval = _resolve_interval(self.config, "checkpoint_tokens",  "checkpoint_interval", 5000)
+        log_interval  = _resolve_interval(self.config, "log_tokens",         "log_interval",        100)
+        sample_interval = _resolve_interval(self.config, "sample_tokens",    "sample_interval",     0)
         ckpt_dir = tcfg.get("checkpoint_dir", "checkpoints")
-        log_interval    = self.config["logging"].get("log_interval", 100)
-        sample_interval = self.config["logging"].get("sample_interval", 0)
 
         import os
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -227,6 +261,13 @@ class BPTTTrainer:
                 self._persistent_state = self.model.init_state(batch)
 
             loss, self._persistent_state = self.train_step(x, y, self._persistent_state)
+
+            # LR management: once per training step (not per BPTT chunk)
+            self._warmup_lr()
+            if self.scheduler and self.step_count >= self.warmup_steps:
+                self.scheduler.step()
+            self.step_count += 1
+
             pbar.update(1)
 
             if step % log_interval == 0:
@@ -257,18 +298,27 @@ class BPTTTrainer:
                 seq_len = self.config["data"]["seq_len"]
                 batch_size = self.config["training"]["batch_size"]
                 max_eval_batches = max(4, min(50, target_tokens // (batch_size * seq_len)))
-                val_loss = self.evaluate(val_loader, max_batches=max_eval_batches)
+                val_loss, dist_stats = self.evaluate(val_loader, max_batches=max_eval_batches)
                 val_ppl = compute_perplexity(val_loss)
+                val_bpt = compute_bpt(val_loss)
+                val_bpb = compute_bpb(val_loss, self._avg_bytes_per_token)
                 tqdm.write(
                     f"step {step:6d} | val_loss={val_loss:.4f} "
-                    f"val_ppl={val_ppl:.2f} val_bpc={compute_bpc(val_loss):.4f}"
+                    f"val_ppl={val_ppl:.2f} val_bpt={val_bpt:.4f} val_bpb={val_bpb:.4f} "
+                    f"H={dist_stats['val/output_entropy']:.3f} "
+                    f"top5={dist_stats['val/top5_conc']:.3f}"
                 )
+                aux_stats = {**dist_stats}
+                aux_stats.update(self._collect_hopfield_stats())
+                aux_stats.update(self._collect_tau_stats(val_loader))
                 if logger:
                     logger.log({
                         "val/loss": val_loss,
                         "val/perplexity": val_ppl,
-                        "val/bpc": compute_bpc(val_loss),
+                        "val/bpt": val_bpt,
+                        "val/bpb": val_bpb,
                         "tokens": tokens_seen,
+                        **aux_stats,
                     }, step=step)
 
             if step % ckpt_interval == 0 and step > 0:
@@ -290,10 +340,22 @@ class BPTTTrainer:
             tqdm.write(f"  final checkpoint saved → {ckpt_dir}/step_{final_step:07d}.pt")
 
     @torch.no_grad()
-    def evaluate(self, val_loader, max_batches: int = 50) -> float:
+    def evaluate(self, val_loader, max_batches: int = 50) -> tuple:
+        """Returns (avg_loss, dist_stats).
+
+        dist_stats contains output-distribution diagnostics averaged over batches:
+          val/output_entropy  — mean H(p) in nats. Lower = sharper predictions.
+          val/top5_conc       — mean fraction of probability mass in top-5 tokens.
+          val/top10_conc      — mean fraction of probability mass in top-10 tokens.
+          val/nll_entropy_gap — mean (NLL - H): large positive → model is confident
+                                but on wrong tokens; near 0 → uncertainty is earned.
+        """
         from tqdm import tqdm
         self.model.eval()
         total_loss = 0.0
+        total_entropy = 0.0
+        total_top5 = 0.0
+        total_top10 = 0.0
         n = 0
         for i, (x, y) in enumerate(tqdm(val_loader, total=max_batches, desc="  evaluating",
                                          leave=False, unit="batch")):
@@ -301,15 +363,37 @@ class BPTTTrainer:
                 break
             x, y = x.to(self.device), y.to(self.device)
             state = self.model.init_state(x.shape[0])
-            logits, _ = self.model(x, state)
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                y.reshape(-1),
-            )
+            logits, _ = self.model(x, state)             # [batch, seq, vocab]
+            flat_logits = logits.reshape(-1, logits.size(-1))
+            flat_y      = y.reshape(-1)
+
+            loss = F.cross_entropy(flat_logits, flat_y)
             total_loss += loss.item()
+
+            # Distribution stats — computed from softmax over vocab
+            log_probs = F.log_softmax(flat_logits, dim=-1)   # [B*T, vocab]
+            probs     = log_probs.exp()
+
+            entropy = -(probs * log_probs).sum(dim=-1).mean().item()
+            top5_conc  = probs.topk(5,  dim=-1).values.sum(dim=-1).mean().item()
+            top10_conc = probs.topk(10, dim=-1).values.sum(dim=-1).mean().item()
+
+            total_entropy += entropy
+            total_top5    += top5_conc
+            total_top10   += top10_conc
             n += 1
+
         self.model.train()
-        return total_loss / max(n, 1)
+        denom = max(n, 1)
+        avg_loss    = total_loss    / denom
+        avg_entropy = total_entropy / denom
+        dist_stats = {
+            "val/output_entropy":  avg_entropy,
+            "val/top5_conc":       total_top5  / denom,
+            "val/top10_conc":      total_top10 / denom,
+            "val/nll_entropy_gap": avg_loss - avg_entropy,
+        }
+        return avg_loss, dist_stats
 
     def _generate_sample(self, step: int):
         """Generate a short text sample and print it via tqdm.write."""
@@ -318,7 +402,7 @@ class BPTTTrainer:
 
         lcfg = self.config.get("logging", {})
         prompt    = lcfg.get("sample_prompt", "")
-        max_toks  = lcfg.get("sample_tokens", 150)
+        max_toks  = lcfg.get("sample_max_tokens", 150)
         top_p     = lcfg.get("sample_top_p", 0.9)
         temp      = lcfg.get("sample_temperature", 0.8)
 
@@ -340,6 +424,80 @@ class BPTTTrainer:
             tqdm.write(f"  {divider}\n")
         except Exception as exc:
             tqdm.write(f"  [sample failed at step {step}: {exc}]")
+
+    @torch.no_grad()
+    def _collect_hopfield_stats(self) -> dict:
+        """Attention entropy and sharpness over the Hopfield memory bank.
+
+        hpc/attn_entropy  — mean Shannon entropy of the attention distribution
+                            (nats; max = log(n_memories)).  High → diffuse/unused;
+                            low → sharp retrieval of specific memories.
+        hpc/attn_max      — mean of the max attention weight per batch item.
+                            Complement to entropy: high → one memory dominates.
+        """
+        hpc = getattr(self.model, "hippocampus", None)
+        if hpc is None:
+            return {}
+        weights = getattr(hpc, "_last_attn_weights", None)
+        if weights is None:
+            return {}
+        # weights: [batch, n_memories]
+        eps = 1e-10
+        entropy = -(weights * (weights + eps).log()).sum(dim=-1).mean().item()
+        attn_max = weights.max(dim=-1).values.mean().item()
+        return {
+            "hpc/attn_entropy": entropy,
+            "hpc/attn_max":     attn_max,
+        }
+
+    @torch.no_grad()
+    def _collect_tau_stats(self, val_loader) -> dict:
+        """Estimate effective neural timescales from autocorrelation of firing rates.
+
+        Steps one batch through the model one token at a time, collects
+        r_l23e and r_l5e traces, computes per-neuron tau_eff via log-linear
+        ACF fit, and logs mean/std/p25/p75 for each layer.
+
+        tau/l23e_mean, tau/l23e_std, tau/l23e_p25, tau/l23e_p75
+        tau/l5e_mean,  tau/l5e_std,  tau/l5e_p25,  tau/l5e_p75
+        """
+        import numpy as np
+        self.model.eval()
+        try:
+            x, _ = next(iter(val_loader))          # [batch, seq_len]
+        except StopIteration:
+            return {}
+        x = x[:4].to(self.device)                  # keep batch small — 4 is enough for ACF
+        batch, seq_len = x.shape
+        state = self.model.init_state(batch)
+
+        traces_l23e, traces_l5e = [], []
+        for t in range(seq_len):
+            _, state = self.model.step(x[:, t], state)
+            col_state = state.column_states
+            if "r_l23e" in col_state:
+                # [batch, n_cols, n_neurons] → mean over batch & cols → [n_neurons]
+                traces_l23e.append(col_state["r_l23e"].mean(dim=(0, 1)).cpu().numpy())
+                traces_l5e.append( col_state["r_l5e" ].mean(dim=(0, 1)).cpu().numpy())
+
+        self.model.train()
+        if not traces_l23e:
+            return {}
+
+        # Stack to [T, n_neurons]
+        arr_l23e = np.stack(traces_l23e)   # [T, n_l23e]
+        arr_l5e  = np.stack(traces_l5e)    # [T, n_l5e]
+
+        stats = {}
+        for key, arr in [("tau/l23e", arr_l23e), ("tau/l5e", arr_l5e)]:
+            taus = compute_effective_timescales(
+                torch.from_numpy(arr), max_lag=min(50, seq_len // 4)
+            )
+            stats[f"{key}_mean"] = float(np.mean(taus))
+            stats[f"{key}_std"]  = float(np.std(taus))
+            stats[f"{key}_p25"]  = float(np.percentile(taus, 25))
+            stats[f"{key}_p75"]  = float(np.percentile(taus, 75))
+        return stats
 
     def _save_checkpoint(self, ckpt_dir: str, step: int):
         import os

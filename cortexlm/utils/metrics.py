@@ -9,9 +9,20 @@ def compute_perplexity(loss: float) -> float:
     return math.exp(loss)
 
 
-def compute_bpc(loss: float) -> float:
-    """Bits per character: loss / log(2)."""
+def compute_bpt(loss: float) -> float:
+    """Bits per token: loss (nats/token) converted to bits/token."""
     return loss / math.log(2)
+
+
+def compute_bpb(loss: float, avg_bytes_per_token: float) -> float:
+    """Bits per byte: bpt divided by average token length in bytes."""
+    if avg_bytes_per_token <= 0:
+        return float("nan")
+    return compute_bpt(loss) / avg_bytes_per_token
+
+
+# Legacy alias
+compute_bpc = compute_bpt
 
 
 def mean_firing_rates(model_outputs: dict) -> dict:

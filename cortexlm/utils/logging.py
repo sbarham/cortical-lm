@@ -41,6 +41,8 @@ class Logger:
             self._wandb = wandb
             wandb.init(
                 project=self.log_cfg.get("project", "cortex-lm"),
+                group=self.log_cfg.get("group"),
+                name=self.config.get("name"),
                 config=self.config,
             )
         except ImportError:

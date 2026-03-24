@@ -44,6 +44,9 @@ class ModernHopfieldHippocampus(HippocampalModule):
         # Stored memory patterns (persistent learnable parameter)
         self.Xi = nn.Parameter(torch.randn(self.n_memories, self.d_model) * 0.02)
 
+        # Diagnostic: last attention weights [batch, n_memories], detached, set each forward pass
+        self._last_attn_weights: Optional[torch.Tensor] = None
+
         # Output projection: d_model → per-column modulation
         # Each column gets a modulation vector of dim modulation_dim
         self.modulation_dim = max(1, self.d_model // n_columns)
@@ -68,6 +71,7 @@ class ModernHopfieldHippocampus(HippocampalModule):
         # scores: [B, M]
         scores = self.beta * (query @ self.Xi.t())   # [batch, n_memories]
         weights = F.softmax(scores, dim=-1)           # [batch, n_memories]
+        self._last_attn_weights = weights.detach()    # store for diagnostics
 
         # Retrieved pattern: [batch, d_model]
         retrieved = weights @ self.Xi   # [batch, d_model]

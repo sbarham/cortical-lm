@@ -1,8 +1,9 @@
-# Phase 1e: full bio-plausible architecture on TinyStories â€” adds Modern Hopfield hippocampus.
-# Complete ablation endpoint before moving to wikitext103.
-# Single variable change vs phase1d_adex: hippocampus on.
+# Phase 1e exploratory: Hopfield + corticortical apical pathway (variant D).
+# Single variable change vs phase1e_hopfield: apical_pathway = corticortical.
+# L5E of column (k+1) feeds back to L23E of column k â€” circular top-down signal.
+# Exploratory run: batch=1024, 4000 steps (~2.5h).
 
-name: cortex-lm-phase1e-hopfield
+name: cortex-lm-phase1e-hopfield-apical-d
 version: "0.1"
 
 data:
@@ -32,6 +33,7 @@ column:
   model: layered
   n_columns: 8
   disinhibition: false
+  apical_pathway: corticortical
   layer_sizes:
     l4:  {n_e: 16, n_i: 4}
     l23: {n_e: 32, n_i: 8}
@@ -45,7 +47,7 @@ connectivity:
 
 hippocampus:
   model: modern_hopfield
-  n_memories: 64        # small memory bank â€” keeps param overhead minimal at Phase 1 scale
+  n_memories: 64
   d_model: 64
   beta: 1.0
   ca1: false
@@ -64,16 +66,16 @@ learning:
   reset_state_between_batches: false
 
 training:
-  batch_size: 512
-  max_tokens: 524_288_000   # canonical Phase 1 budget; steps auto-scale with batch_size
+  batch_size: 1024
+  max_tokens: 524_288_000
   lr: 3.0e-4
   weight_decay: 1.0e-4
   grad_clip: 1.0
   optimizer: adamw
   scheduler: cosine
   warmup_steps: 100
-  eval_tokens: 13_107_200    # every 200 steps @ batch=512 — auto-scales with batch_size
-  checkpoint_tokens: 32_768_000  # every 500 steps @ batch=512 — auto-scales with batch_size
+  eval_tokens: 13_107_200
+  checkpoint_tokens: 32_768_000
   seed: 42
 
 simulation:
@@ -81,7 +83,7 @@ simulation:
 
 logging:
   wandb: false
-  log_tokens: 6_553_600      # every 100 steps @ batch=512 — auto-scales with batch_size
+  log_tokens: 6_553_600
   log_weight_stats: true
   log_tau_stats: true
   log_spike_rates: true
