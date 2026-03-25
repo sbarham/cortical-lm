@@ -143,8 +143,13 @@ class CortexLM(nn.Module):
 
         # Hippocampal modulation: project to embed_dim and add to thalamic increment
         l5_concat = self._get_l5_concat(model_state.column_states, device, batch)
-        hpc_mod, _ = self.hippocampus(l5_concat)   # [batch, n_cols, mod_dim]
+        hpc_mod, hpc_surprise = self.hippocampus(l5_concat)   # [batch, n_cols, mod_dim]
         thal_inc = thal_inc + self.hpc_input_proj(hpc_mod)
+        # hpc_surprise: [batch, 1] scalar mismatch norm (CA1 only), or None.
+        # Stored as attribute so the trainer can log it without changing step() signature.
+        self._last_hpc_surprise = (
+            hpc_surprise.mean().item() if hpc_surprise is not None else None
+        )
 
         # Single batched column forward
         layer_out, new_col_state = self.columns(

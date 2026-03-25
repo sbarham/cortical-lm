@@ -1,4 +1,4 @@
-# Phase 1e: full bio-plausible architecture on TinyStories â€” adds Modern Hopfield hippocampus.
+# Phase 1e: full bio-plausible architecture on TinyStories " adds Modern Hopfield hippocampus.
 # Complete ablation endpoint before moving to wikitext103.
 # Single variable change vs phase1d_adex: hippocampus on.
 
@@ -45,7 +45,7 @@ connectivity:
 
 hippocampus:
   model: modern_hopfield
-  n_memories: 64        # small memory bank â€” keeps param overhead minimal at Phase 1 scale
+  n_memories: 64        # small memory bank " keeps param overhead minimal at Phase 1 scale
   d_model: 64
   beta: 1.0
   ca1: false
@@ -72,8 +72,8 @@ training:
   optimizer: adamw
   scheduler: cosine
   warmup_steps: 100
-  eval_tokens: 13_107_200    # every 200 steps @ batch=512 — auto-scales with batch_size
-  checkpoint_tokens: 32_768_000  # every 500 steps @ batch=512 — auto-scales with batch_size
+  eval_tokens: 13_107_200    # every 200 steps @ batch=512 -- auto-scales with batch_size
+  checkpoint_tokens: 32_768_000  # every 500 steps @ batch=512 -- auto-scales with batch_size
   seed: 42
 
 simulation:
@@ -81,7 +81,7 @@ simulation:
 
 logging:
   wandb: false
-  log_tokens: 6_553_600      # every 100 steps @ batch=512 — auto-scales with batch_size
+  log_tokens: 6_553_600      # every 100 steps @ batch=512 -- auto-scales with batch_size
   log_weight_stats: true
   log_tau_stats: true
   log_spike_rates: true

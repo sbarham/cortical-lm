@@ -1,6 +1,6 @@
 # Phase 1e exploratory: Hopfield + corticortical apical pathway (variant D).
 # Single variable change vs phase1e_hopfield: apical_pathway = corticortical.
-# L5E of column (k+1) feeds back to L23E of column k — circular top-down signal.
+# L5E of column (k+1) feeds back to L23E of column k " circular top-down signal.
 # Exploratory run: batch=1024, 4000 steps (~2.5h).
 
 name: cortex-lm-phase1e-hopfield-apical-d

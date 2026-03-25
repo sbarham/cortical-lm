@@ -59,6 +59,8 @@ PHASES = [
     ("1d", "configs/phase1d_adex.yaml"),
     ("1e", "configs/phase1e_disinhibition.yaml"),
     ("1f", "configs/phase1f_hopfield.yaml"),
+    ("1g", "configs/phase1g_annealed_disinhibition.yaml"),
+    ("1h", "configs/phase1h_ca1.yaml"),
 ]
 
 PHASE_IDS = [p for p, _ in PHASES]

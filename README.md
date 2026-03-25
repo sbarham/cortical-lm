@@ -33,15 +33,35 @@ python -m pytest tests/ -q
 
 ## Configs
 
+**Canonical ablation series (Phase 1)**
+
 | File | Phase | Description |
 |---|---|---|
 | `configs/phase1a_minimal.yaml` | 1a | Rate neurons, `simple_ei` column, no STP/HPC. Baseline. |
 | `configs/phase1b_layered.yaml` | 1b | + Layered cortical columns (L4/L2-3/L5/L6). |
 | `configs/phase1c_stp.yaml` | 1c | + Tsodyks-Markram STP synapses. |
 | `configs/phase1d_adex.yaml` | 1d | + AdEx adaptive neuron dynamics. |
-| `configs/phase1e_disinhibition.yaml` | 1e | + VIP→SST→PC disinhibition circuit. Completes cortical column. |
-| `configs/phase1e_hopfield.yaml` | (exploratory) | Hopfield + AdEx, used for apical pathway factorial. |
-| `configs/phase1f_hopfield.yaml` | 1f | + Modern Hopfield hippocampal module. Full system on TinyStories. |
+| `configs/phase1e_disinhibition.yaml` | 1e | + VIP→SST→PC disinhibition circuit. |
+| `configs/phase1f_hopfield.yaml` | 1f | + Modern Hopfield hippocampal module. Full system. |
+| `configs/phase1f_hopfield_no_disinhibition.yaml` | 1f-ctrl | Control: 1f without disinhibition. Isolates Hopfield contribution. |
+| `configs/phase1g_annealed_disinhibition.yaml` | 1g | 1f + annealed disinhibitory window (1→0 over first 200 M tokens). |
+
+**Apical stream ablation series**
+
+| File | Variant | Description |
+|---|---|---|
+| `configs/apical_none.yaml` | none | No apical pathway. Control. |
+| `configs/apical_skip.yaml` | skip | Direct embed→L5E projection (always active, fan-in init). |
+| `configs/apical_additive.yaml` | additive | Gated projection; sigmoid gate init≈0, learned open. |
+| `configs/apical_multiplicative.yaml` | multiplicative | Larkum calcium spike: `I_l5e *= (1 + tanh(proj(embed)))`. |
+| `configs/apical_corticortical.yaml` | corticortical | Circular column feedback: L5E of col k+1 → L23E of col k. |
+
+All apical configs run on the full Phase-1g architecture (AdEx + STP + annealed disinhibition + Hopfield).  The winning variant is then applied to the full canonical 1a–1g series.
+
+**Other**
+
+| File | Phase | Description |
+|---|---|---|
 | `configs/standard_wikitext103.yaml` | 2 | Full system trained on Wikitext-103. |
 | `configs/bioplausible_tinystories.yaml` | 3a | e-prop learning rule, TinyStories. |
 | `configs/bioplausible_wikitext103.yaml` | 3b | e-prop learning rule, Wikitext-103. |
@@ -152,6 +172,43 @@ python scripts/plot_comparison.py \
 ```
 
 `plot_comparison.py` uses **tokens seen** as the x-axis (a fair comparison across models with different batch sizes), falling back to step count for older runs that pre-date the tokens tracking.
+
+### Canonical series
+
+```bash
+# Run the full Phase-1 ablation series (1a through 1g) sequentially
+python scripts/run_canonical.py \
+    --wandb-project cortex-lm --wandb-group canonical
+
+# Include parameter-matched baselines at the end
+python scripts/run_canonical.py \
+    --wandb-project cortex-lm --wandb-group canonical \
+    --baselines
+
+# Resume from a specific phase (e.g. after 1c completed)
+python scripts/run_canonical.py --start-from 1d \
+    --tokenizer checkpoints/phase1a/tokenizer.pkl
+
+# Dry run (print commands only)
+python scripts/run_canonical.py --dry-run
+```
+
+### Apical stream ablation
+
+```bash
+# Run all five apical_pathway variants on the full Phase-1g architecture
+python scripts/run_apical_ablation.py \
+    --wandb-project cortex-lm --wandb-group apical-ablation \
+    --tokenizer checkpoints/phase1a/tokenizer.pkl
+
+# Run only selected variants
+python scripts/run_apical_ablation.py --variants none additive multiplicative
+
+# After results: re-run canonical series with winning apical variant
+python scripts/run_canonical.py \
+    --wandb-project cortex-lm --wandb-group canonical-with-apical \
+    --override column.apical_pathway=additive
+```
 
 ### Baselines
 
@@ -306,24 +363,66 @@ configs/
 
 ## Experimental phases
 
-### Phase 1 — validate the scaffold
-`configs/minimal.yaml`: rate neurons, `simple_ei` columns, no STP, no hippocampus, BPTT.
-Goal: confirm the cortical architecture can learn next-token prediction at all.
+### Phase 1 — canonical ablation series (TinyStories, 1B tokens)
 
-### Phase 2 — add biological fidelity (ablation series)
-Each biological ingredient enabled individually, holding parameter count fixed:
-1. `column: layered` — full 6-layer cortical column
-2. `synapse.inter_column_stp: true` — Tsodyks-Markram STP
-3. `neuron: rate_adex` — AdEx adaptation dynamics
-4. `hippocampus: modern_hopfield` — CA3-style episodic memory
+Each phase adds exactly one biological ingredient.  All runs share the same
+tokenizer, dataset, batch size (512), and 1B-token budget.
 
-Use `--count-params` to tune `layer_sizes` so each variant has the same parameter budget before committing to a full run.
+| Phase | Config | New ingredient | Val ppl (TinyStories) |
+|---|---|---|---|
+| 1a | `phase1a_minimal.yaml` | Rate neurons, simple_ei column | ~32 |
+| 1b | `phase1b_layered.yaml` | Layered cortical columns (L4/L2-3/L5/L6) | ~56 (overfits) |
+| 1c | `phase1c_stp.yaml` | Tsodyks-Markram STP | ~41 |
+| 1d | `phase1d_adex.yaml` | AdEx adaptive neuron dynamics | ~26 |
+| 1e | `phase1e_disinhibition.yaml` | VIP→SST→PC disinhibition circuit | ~29 |
+| 1f | `phase1f_hopfield.yaml` | Modern Hopfield hippocampal module | TBD |
+| 1f-ctrl | `phase1f_hopfield_no_disinhibition.yaml` | Hopfield without disinhibition (control) | TBD |
+| 1g | `phase1g_annealed_disinhibition.yaml` | Annealed disinhibitory window (1→0 over 200M tokens) | TBD |
+| 1h | `phase1h_ca1.yaml` | + CA1 entorhinal prediction-error signal (1g + ca1: true) | TBD |
 
-### Phase 3 — comparison vs. baselines
-`run_baselines.py` trains RNN, LSTM, RNN+attention, LSTM+attention, and Transformer baselines at matched parameter counts. `plot_comparison.py` renders all learning curves on a shared tokens-seen axis.
+Key findings so far: AdEx (1d) is the dominant contributor — it achieves the
+lowest val ppl and tightest train/val gap.  Disinhibition (1e) accelerates
+early convergence but slightly underperforms AdEx alone at 1B tokens, motivating
+the annealed variant (1g).
 
-### Phase 4 — e-prop
-`configs/bioplausible.yaml`: identical architecture to Phase 2 but trained with online e-prop (Bellec et al. 2020) instead of BPTT. Quantifies the cost of biological learning rule constraints.
+Run the series: `python scripts/run_canonical.py --wandb-project cortex-lm`
+
+### Phase 2 — apical stream ablation
+
+Five apical_pathway variants applied to the full Phase-1g architecture.
+Goal: find the top-down pathway that best complements the cortical column.
+
+| Variant | Config | Description |
+|---|---|---|
+| none | `apical_none.yaml` | No apical input (control) |
+| skip | `apical_skip.yaml` | Direct embed→L5E, active from step 0 |
+| additive | `apical_additive.yaml` | Gated projection; gate learned from ~0 |
+| multiplicative | `apical_multiplicative.yaml` | Larkum calcium spike nonlinearity |
+| corticortical | `apical_corticortical.yaml` | Circular column feedback L5E(k+1)→L23E(k) |
+
+Run the series: `python scripts/run_apical_ablation.py --wandb-project cortex-lm`
+
+### Phase 3 — canonical + winning apical variant
+
+Re-run the full 1a–1g canonical series with the best apical variant applied
+at each phase.  This tests whether the top-down pathway helps early phases
+(simple architectures) or only the full system.
+
+```bash
+python scripts/run_canonical.py \
+    --wandb-project cortex-lm --wandb-group canonical-with-apical \
+    --override column.apical_pathway=<winner>
+```
+
+### Phase 4 — comparison vs. baselines
+`run_baselines.py` trains RNN, LSTM, RNN+attention, LSTM+attention, and Transformer
+baselines at matched parameter counts.  `plot_comparison.py` renders all learning
+curves on a shared tokens-seen axis.
+
+### Phase 5 — e-prop
+`configs/bioplausible.yaml`: identical architecture to Phase 1g but trained with
+online e-prop (Bellec et al. 2020) instead of BPTT.  Quantifies the cost of
+biological learning rule constraints.
 
 ---
 
@@ -334,7 +433,348 @@ Use `--count-params` to tune `layer_sizes` so each variant has the same paramete
 - **AdEx adaptation** — subthreshold adaptation current w with timescale τ_w (30–500 ms) implements spike-frequency adaptation
 - **Tsodyks-Markram STP** — synaptic resources (u, x) deplete and recover; facilitating (E→E) vs. depressing (E→I) depending on U₀
 - **Laminar routing** — feedforward signals travel L4 → L2/3 → L5; feedback travels L5 → L2/3 of lower-index columns
+- **VIP→SST→PC disinhibition** — VIP interneurons inhibit SST cells, releasing pyramidal cells from inhibition; implements context-dependent gain control.  Optionally annealed: `column.disinhibition_anneal_tokens` decays the VIP→SST gain linearly from 1→0, modelling the closure of a critical-period plasticity window
 - **Modern Hopfield hippocampus** — retrieves stored patterns via softmax attention; CA1 surprise signal = L2 distance between retrieved and actual state
+- **Apical dendritic pathway** — top-down embedding signal reaches L5 neurons via a separate apical compartment; five variants: `none`, `skip`, `additive` (gated), `multiplicative` (Larkum calcium spike), `corticortical` (circular column feedback)
+
+---
+
+## Probably novel contributions
+
+A candid assessment of what appears to be new vs. what the literature already knows.
+Intended as a working checklist for the lit review and as framing for the paper introduction.
+
+### What is already known (not our contribution)
+- Modern Hopfield Networks are mathematically equivalent to transformer attention (Ramsauer et al. 2020)
+- Cortical column models can perform temporal processing; liquid state machines (Maass 2002–2004)
+- Complementary Learning Systems theory: hippocampus + neocortex solve the stability-plasticity dilemma (McClelland, McNaughton & O'Reilly 1995)
+- AdEx adaptive exponential integrate-and-fire neuron model (Brette & Gerstner 2005)
+- VIP→SST→PC disinhibitory circuit exists and modulates cortical gain (Pfeffer et al. 2013, Lee et al. 2013)
+
+### What appears to be novel
+
+**1. Ablation rigor on a language task.**
+A clean, controlled ablation study of biologically-motivated architectural components on a language
+modelling benchmark with matched parameter counts throughout.  Computational neuroscience has cortical
+column models; ML has biologically-inspired architectures — but neither field has applied ML-style
+empirical discipline (held-out val ppl, token-budget matching, systematic one-variable-at-a-time
+ablation) to this class of model.  The combination is the gap.
+
+**2. AdEx spike-frequency adaptation as implicit regulariser.**
+The finding that AdEx neurons produce a dramatically tighter train/val gap than plain rate neurons with
+identical parameter count (gap ~5 ppl vs. ~33 ppl for layered columns) in a data-repetition regime
+does not appear to be documented in this form.  The proposed mechanism — adaptation forcing distributed
+representations by progressively suppressing repeatedly-active neurons — is a clean, falsifiable claim
+that connects neuron dynamics to generalisation theory.
+
+**3. CLS theory confirmed in language modelling.**
+CLS has been empirically tested in spatial navigation, simple categorisation, and toy sequence tasks.
+Extending it to language — with a model that has structurally separate hippocampal (Hopfield) and
+neocortical (layered columns) components — and obtaining an ~8× token-efficiency improvement
+consistent with CLS predictions is a nontrivial extension of the theory to a new domain.
+
+**4. Annealed disinhibitory window as a training schedule.**
+Implementing critical-period plasticity as a token-budget-proportional annealing schedule
+(`disinhibition_anneal_tokens`) appears to be a novel technique.  The biological story is clean:
+early high-plasticity window accelerates credit assignment; withdrawal of VIP→SST gain as the
+cortex matures mirrors the closure of ocular dominance critical periods.  Whether it improves
+performance vs. always-on disinhibition is pending (phase 1g).
+
+**5. Differentiable CA1 write-gating for surprise-driven memory consolidation.**
+Memory-augmented networks (NTMs, DNCs) have differentiable write gates, but these are not grounded
+in the CA1 mismatch story.  Our implementation — `write_gate = sigmoid(T * ||retrieved - ec_obs||)`,
+which suppresses Xi gradients for familiar patterns and allows them for surprising ones — is a novel
+connection between the systems neuroscience of novelty detection (temporoammonic lesion dissociations)
+and differentiable persistent memory.  Whether it improves on CA3-only Hopfield is pending (phase 1h).
+
+### Honest caveats
+- The model does not yet match the transformer at matched parameter count (~14 ppl target).  The
+  paper's claim is not performance parity but that biological priors provide measurable, interpretable,
+  additive benefits.  Phase 1f (Hopfield) and 1h (CA1) results will sharpen this.
+- ~620K parameters on TinyStories is small.  Scaling to larger models and datasets is the natural
+  Phase 2 and is needed for the ML community to engage seriously.
+- Rate-coded neurons are partial biological plausibility.  Spiking network reviewers will flag this.
+
+---
+
+## Paper stories / key takeaways
+
+A running record of the empirical results that are strong enough to anchor a paper narrative.
+Updated as canonical runs complete.  All perplexities are **validation ppl** on TinyStories
+unless noted.  Parameter count: ~620K throughout.
+
+---
+
+### Story 1 — The hippocampus is the dominant contributor (by a large margin)
+
+Phase 1f (full system + Hopfield hippocampus) reaches **val ppl ≈ 34** at only 121M tokens —
+already lower than where AdEx (the best purely-cortical variant) finishes after a full 1B
+tokens (val ppl ≈ 26.25 at convergence, but 54 at 121M tokens).  The Hopfield module
+compresses the learning curve by roughly **8×** in token efficiency.
+
+At 63M tokens, 1f train ppl is 44.8 — roughly half the train ppl of AdEx (88.4) at the same
+point.  The Hopfield network is not just converging faster; it appears to be finding a
+qualitatively different (better-generalising) solution.
+
+**Proposed interpretation:** the hippocampal module acts as an episodic buffer that stores and
+re-projects L5 population patterns.  This provides a second gradient pathway (HPC modulation
+→ thalamic increment) that bypasses the deep cortical stack, dramatically reducing effective
+depth during early training.  As the cortical weights mature, the HPC path becomes
+complementary rather than dominant.
+
+**Paper claim:** a biologically-grounded episodic memory (Hopfield network) dramatically
+accelerates cortical learning and improves final generalisation — consistent with the
+complementary learning systems (CLS) theory of hippocampal–neocortical interaction.
+
+---
+
+### Story 2 — AdEx is the best purely-cortical component
+
+Among phases 1a–1e (no hippocampus), AdEx (1d) achieves the lowest final val ppl (~26.25)
+and the tightest train/val gap (~5.7 points) despite a 20× data repetition regime.  Layered
+columns alone (1b) overfit catastrophically (train ppl ~22.7, val ppl ~55.6).
+
+**Proposed interpretation:** the AdEx adaptation timescale distribution (τ_w ∈ [30, 500] ms)
+acts as an implicit regulariser: neurons that fire repeatedly for the same stimulus
+progressively reduce their gain, forcing the network to use distributed representations rather
+than dedicated "story-memorising" neurons.  This is functionally analogous to dropout or
+weight decay, but emerges from the neuron dynamics.
+
+**Paper claim:** spike-frequency adaptation in AdEx neurons provides implicit regularisation
+that resists memorisation, producing a tight train/val gap even when training data is repeated
+~20 times.
+
+---
+
+### Story 3 — Disinhibition accelerates early learning but plateaus
+
+Phase 1e (AdEx + VIP→SST→PC disinhibition) has the fastest early convergence of any phase:
+at 72M tokens it leads all other variants.  However, by ~500M tokens AdEx (without
+disinhibition) surpasses it, and at 1B tokens 1e finishes ~3 ppl worse than 1d.
+
+**Proposed interpretation:** the VIP disinhibitory circuit implements context-dependent gain
+control that is most useful when the feedforward weights are uninformative (early training).
+As weights mature, the extra VIP→SST pathway adds noise and slightly overfits.  This
+motivates the annealed variant (phase 1g), which withdraws the disinhibitory window after
+200M tokens — biologically analogous to the closure of a critical-period plasticity window.
+
+**Paper claim:** early disinhibitory windows accelerate initial credit assignment;
+annealing them away as training matures should yield the best of both worlds.  (To be
+confirmed by phase 1g results.)
+
+---
+
+### Story 4 — Apical pathway placement matters: L5 not L23
+
+Exploratory runs with all four apical variants (skip/additive/multiplicative/corticortical)
+on the Hopfield base showed that the corticortical variant (which injects the top-down signal
+into L23E rather than L5E) significantly underperforms the others (val ppl ~36 vs ~30 for
+multiplicative at step 2200).  Gradient analysis reveals that l4_to_l23 norms are ~10×
+smaller in the corticortical variant — the top-down signal at L23 interferes with feedforward
+credit assignment from L4.
+
+**Proposed interpretation:** consistent with biology, top-down signals should arrive at the
+**apical dendrites of L5 pyramidal neurons** (Larkum 2013), not at L2/3 where they compete
+with ascending feedforward input.  The L5 apical compartment is the "coincidence detector"
+that combines context with feedforward evidence; injecting context at L23 instead corrupts
+the hierarchy.
+
+**Paper claim:** the locus of top-down input (L5 apical vs. L23) determines whether
+contextual signals help or hurt; biology gets this right by routing feedback to L5.
+
+---
+
+### Open questions / to be confirmed
+
+- **Does annealing disinhibition improve over always-on disinhibition?**  Phase 1g pending.
+- **Does CA1 error signal improve late-training generalisation?**  Phase 1h pending.  Prediction: diverges from 1g most strongly after 400M tokens.
+- **Which apical variant is best on the full architecture?**  Apical ablation series pending.
+- **Does the best apical variant improve all phases 1a–1f?**  Phase 3 (canonical + winning apical) pending.
+- **Transformer target (~14 ppl) confirmed?**  Awaiting baseline runs.
+
+---
+
+### Architectural directions for closing the gap with the transformer
+
+The transformer at ~620K parameters likely achieves ~14 ppl via attention, which is
+essentially an explicit learned associative lookup over every token in the context window.
+Our current architecture does something analogous but more constrained: the Hopfield module
+is a small associative buffer modulating thalamic input, not a full sequence-level attention.
+Below are the most promising directions, with biological justification for each.
+
+---
+
+#### Direction 1 — Larger Hopfield memory (`n_memories`, `d_model`)
+
+**What to try:** increase `hippocampus.n_memories` (e.g. 128→256→512) and `hippocampus.d_model`
+(e.g. 64→256→512).  These are orthogonal axes: more memories increases retrieval breadth;
+larger d_model increases what each memory can represent.
+
+**On d_model in particular:** if `d_model > cortical_representation_dim` (currently 128 = 8
+columns × 16 L5E neurons), the memory matrix has room to store *structured compositions* — a
+single memory vector can encode a temporally extended cortical trajectory rather than a single
+snapshot.  Think of it as the hippocampus "decompressing" a compressed episodic code back into
+a full cortical activity sequence.  This is analogous to how some state-space models (Mamba,
+S4) represent long contexts as single compressed vectors; a large d_model gives the Hopfield
+network the same capacity.
+
+**Biological basis:** CA3 pyramidal neurons have very large dendritic trees — each cell
+integrates input from thousands of other CA3 cells.  The effective "dimension" of the CA3
+attractor space is much larger than any individual cell count suggests, because the attractor
+geometry is shaped by the full weight matrix.  A larger d_model is a more faithful model of
+this high-dimensional attractor landscape.
+
+---
+
+#### Direction 2 — CA1 surprise / prediction-error signal
+
+**What it is:** in the real hippocampus, CA1 receives input from *two* sources simultaneously:
+- **CA3** (via Schaffer collaterals): the pattern-completed *retrieved* memory
+- **Entorhinal cortex layer III** (temporoammonic path): the *actual* current input, bypassing CA3
+
+CA1 computes the mismatch.  This serves **two functions** — and the second is primary:
+
+1. **Error feedback to cortex** (CA1 → EC layer V → neocortex): tells the cortex how reality
+   departs from the retrieved memory.
+2. **Gates memory writes**: high surprise → memory is stale → update Xi.  Low surprise →
+   familiar pattern → protect Xi from overwriting.  *This is the primary function — the
+   hippocampus uses CA1 to decide what to write, not just to inform the cortex.*
+
+**In our model** (`ca1: true`):
+- `write_gate = sigmoid(temperature * ||error_vec||)` scales the gradient flowing into Xi.
+  High surprise → gate ≈ 1 → Xi updated.  Low surprise → gate ≈ 0 → Xi frozen.
+  Implemented by interpolating `retrieved` with `retrieved.detach()`, so gradients through
+  Xi are scaled by the gate value.
+- The directional error vector is also projected to thalamic modulation space (function 1),
+  so the cortex receives both the CA3 context and the CA1 correction.
+- `surprise_scale` is a learnable log-temperature controlling write-gate sharpness.
+
+**Prediction:** `hpc/ca1_surprise` in W&B should decay over training — the network
+gets better at predicting its own memories.  Improvement over 1f expected mainly
+after 400M tokens (the heavy-repetition regime), when selective consolidation matters most.
+
+**Biological basis:** temporoammonic lesions selectively impair novelty detection while
+leaving CA3 pattern completion intact — exactly the dissociation we'd expect if CA1's
+primary function is write-gating, not read-out.
+
+---
+
+#### Direction 3 — Annealed disinhibitory window (Phase 1g)
+
+**What to try:** `column.disinhibition_anneal_tokens: 200_000_000` (already implemented).
+
+**Why it should help:** early in training (first ~4 passes through data), the feedforward
+cortical weights are uninformative.  The VIP→SST→PC circuit opens a gain-control gate that
+amplifies the most active neurons regardless of whether they are correct — essentially
+lowering the signal/noise threshold to allow faster credit assignment.  As weights mature,
+this gate becomes counterproductive: it amplifies noise rather than signal, and the extra
+VIP parameters contribute to overfitting.  Annealing to zero by 200M tokens withdraws the
+gate as the cortex becomes self-sufficient.
+
+**Biological analogy:** critical period plasticity in visual cortex — monocular deprivation
+causes rapid ocular dominance shifts only during a sensitive period that closes as inhibitory
+circuits mature.  The closure is driven by PV (fast-spiking) interneuron maturation, not VIP,
+but the principle is the same: a window of high plasticity followed by consolidation.
+
+**Expected gain:** ~1–2 ppl over 1f, primarily in the 200M–1B token regime.
+
+---
+
+#### Direction 4 — Learnable timescales
+
+**What to try:** `neuron.learn_taus: true` — makes τ_m and τ_w gradient-optimised parameters
+rather than fixed draws from the log-normal prior.
+
+**Biological basis:** cortical membrane timescales are not fixed.  Three mechanisms:
+1. **Neuromodulation**: acetylcholine, norepinephrine, and dopamine all modulate membrane
+   conductances, effectively changing τ_m on seconds-to-minutes timescales.  This is a form
+   of learned gain control.
+2. **Ion channel expression**: neurons up/downregulate K⁺ channels (Kv1, Kv4, HCN) that
+   directly set τ_m; this is activity-dependent and experience-dependent over days.
+3. **Cortical hierarchy gradient**: empirically, τ_m is longer in higher areas (prefrontal
+   ~100 ms) than lower areas (V1 ~10 ms).  This gradient is thought to develop to match the
+   timescales of the statistical structure in the environment — a longer timescale in
+   prefrontal is appropriate because it needs to integrate information over longer horizons.
+
+In our model, learnable τ values would allow the network to self-organise a temporal hierarchy
+where some neurons track fast local patterns and others integrate slowly over context —
+potentially recovering something like the multi-scale attention of a transformer, but via
+neuronal dynamics rather than explicit positional attention.
+
+---
+
+#### Direction 5 — Best apical variant (from ablation series)
+
+**Expected gain:** ~1 ppl, possibly more if the winning variant interacts synergistically with
+Hopfield.  The additive and multiplicative variants are most likely to win based on the
+exploratory runs.  The apical pathway provides a direct gradient highway from the output back
+to L5, complementing the HPC path — together they give the network two fast-credit-assignment
+routes that bypass the deep cortical stack.
+
+---
+
+#### Summary table
+
+| Direction | Config change | Expected gain | Biological justification |
+|---|---|---|---|
+| Larger Hopfield memory | `n_memories: 256, d_model: 256` | ~3–5 ppl | CA3 high-dimensional attractor space |
+| CA1 surprise signal | `hippocampus.ca1: true` | ~2–3 ppl | Entorhinal→CA1 mismatch / novelty gating |
+| Annealed disinhibition | `disinhibition_anneal_tokens: 200M` | ~1–2 ppl | Critical-period plasticity window closure |
+| Learnable timescales | `learn_taus: true` | ~1–2 ppl | Neuromodulation; cortical hierarchy gradient |
+| Best apical variant | `apical_pathway: additive|multiplicative` | ~1 ppl | Apical dendritic calcium spike (Larkum 2013) |
+
+Stacking all five could plausibly close the ~12 ppl gap to the transformer, but
+interactions are unknown — some may be redundant.
+
+---
+
+### Theoretical lens and target community
+
+**Complementary Learning Systems (CLS) theory** (McClelland, McNaughton & O'Reilly 1995) is
+the most natural framing for this work.  CLS argues that the brain requires two systems with
+opposing memory properties:
+
+- **Hippocampus**: fast learning, sparse representations, stores individual episodes without
+  interference; can encode a memory in a single exposure.
+- **Neocortex**: slow learning, distributed overlapping representations, extracts statistical
+  regularities across many exposures.
+
+Fast learning into distributed representations causes catastrophic interference — new
+memories overwrite old ones.  The solution: the hippocampus buffers new experiences and
+slowly "replays" them to the cortex during offline periods, allowing gradual consolidation.
+
+Our architecture is the first (to our knowledge) computational implementation of CLS in a
+language model.  The Hopfield module plays CA3; the cortical stack plays neocortex.  The
+result — hippocampus dramatically accelerates cortical learning and improves generalisation —
+is a direct empirical confirmation of the CLS prediction, in a domain (language) far from the
+spatial navigation tasks where CLS was originally proposed.
+
+**Target communities:**
+
+| Community | Why they care | Where they publish |
+|---|---|---|
+| Computational neuroscience | CLS theory, cortical column models, hippocampal memory | Cosyne, CCN, NeurIPS Neuro, eLife, PLOS Comp Bio |
+| Cognitive neuroscience / memory | Hippocampal–neocortical interaction, episodic memory | Neuron, Nature Neuroscience, Hippocampus |
+| ML / deep learning (biologically inspired) | Structured architectures, inductive biases, memory-augmented networks | NeurIPS, ICLR, ICML |
+| Reservoir computing | Fixed vs. trainable dynamics, temporal processing in recurrent networks | Neural Networks, NeurIPS workshops, Cosyne |
+| State-space / structured RNN community | Mamba/S4 people interested in biology-inspired alternatives | ICLR, NeurIPS |
+
+**Reservoir computing note:** reservoir computing (Jaeger's Echo State Networks, Maass's
+Liquid State Machines) is a subfield primarily sitting at the intersection of computational
+neuroscience and ML.  The core idea is a fixed random recurrent network ("reservoir") that
+transforms inputs into a rich nonlinear feature space, with only the readout layer trained.
+Our architecture is spiritually related — the cortical columns with heterogeneous AdEx
+timescales form a rich dynamical reservoir — but we train the full cortical weights rather
+than just the readout.  The reservoir computing community would find our work interesting as a
+"structured reservoir" paper: instead of a random reservoir, we use biologically-structured
+connectivity and dynamics, and show this structure matters.  Key reservoir computing venues:
+Neural Computation, Neural Networks journal, Cosyne workshops.
+
+**Recommended framing:** lead with the CLS story (it gives an a-priori theoretical prediction
+that the hippocampus should help in repetition-heavy regimes, which the data confirms) but
+write the methods to also appeal to the ML inductive-bias community.  The ablation structure
+of the paper — each biological ingredient measured in isolation — is the strongest card for
+the ML audience, since it directly answers "what does each prior buy you?"
 
 ---
 

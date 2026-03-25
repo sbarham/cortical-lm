@@ -256,6 +256,12 @@ class BPTTTrainer:
             batch = x.shape[0]
             tokens_seen += batch * x.shape[1]
 
+            # Disinhibition annealing: decay VIP→SST gain from 1→0 over anneal window
+            cols = getattr(self.model, "columns", None)
+            if cols is not None and getattr(cols, "disinhibition_anneal_tokens", 0) > 0:
+                scale = max(0.0, 1.0 - tokens_seen / cols.disinhibition_anneal_tokens)
+                cols.set_disinhibition_scale(scale)
+
             # Initialize or reuse persistent state
             if self._persistent_state is None or self.reset_state:
                 self._persistent_state = self.model.init_state(batch)
@@ -290,6 +296,9 @@ class BPTTTrainer:
                         "lr": lr, "tokens": tokens_seen,
                     }
                     log_dict.update(self._last_grad_norms)
+                    _cols = getattr(self.model, "columns", None)
+                    if _cols is not None and getattr(_cols, "disinhibition_anneal_tokens", 0) > 0:
+                        log_dict["disinhibition/scale"] = _cols._disinhibition_scale
                     logger.log(log_dict, step=step)
 
             if step % eval_interval == 0:
@@ -445,10 +454,15 @@ class BPTTTrainer:
         eps = 1e-10
         entropy = -(weights * (weights + eps).log()).sum(dim=-1).mean().item()
         attn_max = weights.max(dim=-1).values.mean().item()
-        return {
+        stats = {
             "hpc/attn_entropy": entropy,
             "hpc/attn_max":     attn_max,
         }
+        # CA1 surprise: mean mismatch norm from last training step
+        surprise = getattr(self.model, "_last_hpc_surprise", None)
+        if surprise is not None:
+            stats["hpc/ca1_surprise"] = surprise
+        return stats
 
     @torch.no_grad()
     def _collect_tau_stats(self, val_loader) -> dict:

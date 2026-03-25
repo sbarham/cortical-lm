@@ -1,8 +1,21 @@
-# Phase 1f: full bio-plausible architecture on TinyStories " adds Modern Hopfield hippocampus.
-# Extends phase1e_disinhibition: hippocampus on, disinhibition on.
-# Complete ablation endpoint before moving to wikitext103.
+# Phase 1g: full system + annealed disinhibitory window.
+# Extends phase1f_hopfield: disinhibition on but linearly annealed to zero
+# over the first 200M tokens (roughly 4 passes through TinyStories).
+#
+# Biological motivation: VIP->SST->PC disinhibition implements a critical-period
+# plasticity window. Early in training the circuit acts as a context-dependent
+# gain gate that accelerates credit assignment. As the feedforward weights mature
+# the gate is withdrawn, preventing the overfit penalty seen in phase1e/1f.
+#
+# Annealing schedule: disinhibition_scale = max(0, 1 - tokens / anneal_tokens)
+#   tokens=0         -> scale=1.0 (full disinhibition)
+#   tokens=100M      -> scale=0.5
+#   tokens=200M      -> scale=0.0 (disinhibition off for remaining 800M tokens)
+#
+# To change the window length override:
+#   --override column.disinhibition_anneal_tokens=400000000
 
-name: cortex-lm-phase1f-hopfield
+name: cortex-lm-phase1g-annealed-disinhibition
 version: "0.1"
 
 data:
@@ -31,9 +44,9 @@ synapse:
 column:
   model: layered
   n_columns: 8
-  disinhibition: true         # VIPSSTPC disinhibition circuit (from 1e)
-  apical_pathway: additive    # variant B " best gradient health in factorial study
-                              # swap to multiplicative if variant C edges ahead on full run
+  disinhibition: true
+  disinhibition_anneal_tokens: 200_000_000   # anneal VIP->SST gain 1->0 over first 200M tokens
+  apical_pathway: additive
   layer_sizes:
     l4:  {n_e: 16, n_i: 4}
     l23: {n_e: 32, n_i: 8}
@@ -67,7 +80,7 @@ learning:
 
 training:
   batch_size: 512
-  max_tokens: 1_000_000_000   # canonical Phase 1 budget
+  max_tokens: 1_000_000_000
   lr: 3.0e-4
   weight_decay: 1.0e-4
   grad_clip: 1.0

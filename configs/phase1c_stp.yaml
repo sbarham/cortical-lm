@@ -1,7 +1,7 @@
 # Phase 1c: layered columns + Short-Term Plasticity synapses.
-# Adds STP to phase1b_layered â€” excitatory synapses depress, inhibitory facilitate.
+# Adds STP to phase1b_layered " excitatory synapses depress, inhibitory facilitate.
 # Single variable change vs phase1b: STP on.
-# STP adds dynamic per-synapse state (release probability) â€” implicit working memory.
+# STP adds dynamic per-synapse state (release probability) " implicit working memory.
 
 name: cortex-lm-phase1c-stp
 version: "0.1"
@@ -20,7 +20,7 @@ neuron:
   learn_taus: false
 
 synapse:
-  inter_column_stp: true      # STP on â€” the only change vs phase1b
+  inter_column_stp: true      # STP on " the only change vs phase1b
   tau_f_range: [50, 300]
   tau_d_range: [100, 800]
   e_synapse_type: depressing
@@ -67,8 +67,8 @@ training:
   optimizer: adamw
   scheduler: cosine
   warmup_steps: 100
-  eval_tokens: 1_638_400    # every 200 steps @ batch=512 — auto-scales with batch_size
-  checkpoint_tokens: 32_768_000  # every 500 steps @ batch=512 — auto-scales with batch_size
+  eval_tokens: 1_638_400    # every 200 steps @ batch=512 -- auto-scales with batch_size
+  checkpoint_tokens: 32_768_000  # every 500 steps @ batch=512 -- auto-scales with batch_size
   seed: 42
 
 simulation:
@@ -76,4 +76,4 @@ simulation:
 
 logging:
   wandb: false
-  log_tokens: 1_638_400      # every 100 steps @ batch=512 — auto-scales with batch_size
+  log_tokens: 1_638_400      # every 100 steps @ batch=512 -- auto-scales with batch_size

@@ -335,6 +335,10 @@ class BatchedLayeredColumns(nn.Module):
         # and inhibit the SST (I) population, thereby disinhibiting pyramidal cells.
         # n_vip ≈ n_i // 2 per layer (VIP is a minority interneuron subtype).
         self.disinhibition = ccfg.get("disinhibition", False)
+        # Annealing: number of tokens over which VIP→SST gain decays 1→0.
+        # 0 means no annealing (always full strength).
+        self.disinhibition_anneal_tokens = int(ccfg.get("disinhibition_anneal_tokens", 0))
+        self._disinhibition_scale = 1.0  # updated by trainer during annealing
         if self.disinhibition:
             self.n_l4vip  = max(1, self.n_l4i  // 2)
             self.n_l23vip = max(1, self.n_l23i // 2)
@@ -360,6 +364,14 @@ class BatchedLayeredColumns(nn.Module):
             self.syn_l6_vip_sst  = BatchedStaticSynapse(n_cols, 0, self.n_l6vip,  self.n_l6i)
 
     # ── helpers ──────────────────────────────────────────────────────────────
+
+    def set_disinhibition_scale(self, scale: float) -> None:
+        """Set VIP->SST gain for annealing (1.0 = full strength, 0.0 = silent).
+
+        Called by the trainer each step when disinhibition_anneal_tokens > 0.
+        Safe to call even when disinhibition is False (no-op).
+        """
+        self._disinhibition_scale = float(scale)
 
     def _update_vip(self, pop_vip, I_vip, state, prefix):
         """Update a VIP interneuron population.  Returns (r_vip_new, out_state)."""
@@ -419,7 +431,7 @@ class BatchedLayeredColumns(nn.Module):
             r_l4vip = state["r_l4vip"]
             I_l4_vip = self.syn_l4_e_vip(r_l4e, z0(batch, n_cols, 0))
             r_l4vip_new, ns_l4vip = self._update_vip(self.l4_vip, I_l4_vip, state, "l4")
-            I_l4i = I_l4i + self.syn_l4_vip_sst(z0(batch, n_cols, 0), r_l4vip)
+            I_l4i = I_l4i + self._disinhibition_scale * self.syn_l4_vip_sst(z0(batch, n_cols, 0), r_l4vip)
 
         r_l4e_new, r_l4i_new, ns_l4 = self._update_layer(
             self.l4_e, self.l4_i, I_l4e, I_l4i, state, "l4")
@@ -442,7 +454,7 @@ class BatchedLayeredColumns(nn.Module):
             r_l23vip = state["r_l23vip"]
             I_l23_vip = self.syn_l23_e_vip(r_l23e, z0(batch, n_cols, 0))
             r_l23vip_new, ns_l23vip = self._update_vip(self.l23_vip, I_l23_vip, state, "l23")
-            I_l23i = I_l23i + self.syn_l23_vip_sst(z0(batch, n_cols, 0), r_l23vip)
+            I_l23i = I_l23i + self._disinhibition_scale * self.syn_l23_vip_sst(z0(batch, n_cols, 0), r_l23vip)
 
         r_l23e_new, r_l23i_new, ns_l23 = self._update_layer(
             self.l23_e, self.l23_i, I_l23e, I_l23i, state, "l23")
@@ -466,7 +478,7 @@ class BatchedLayeredColumns(nn.Module):
             r_l5vip = state["r_l5vip"]
             I_l5_vip = self.syn_l5_e_vip(r_l5e, z0(batch, n_cols, 0))
             r_l5vip_new, ns_l5vip = self._update_vip(self.l5_vip, I_l5_vip, state, "l5")
-            I_l5i = I_l5i + self.syn_l5_vip_sst(z0(batch, n_cols, 0), r_l5vip)
+            I_l5i = I_l5i + self._disinhibition_scale * self.syn_l5_vip_sst(z0(batch, n_cols, 0), r_l5vip)
 
         r_l5e_new, r_l5i_new, ns_l5 = self._update_layer(
             self.l5_e, self.l5_i, I_l5e, I_l5i, state, "l5")
@@ -483,7 +495,7 @@ class BatchedLayeredColumns(nn.Module):
             r_l6vip = state["r_l6vip"]
             I_l6_vip = self.syn_l6_e_vip(r_l6e, z0(batch, n_cols, 0))
             r_l6vip_new, ns_l6vip = self._update_vip(self.l6_vip, I_l6_vip, state, "l6")
-            I_l6i = I_l6i + self.syn_l6_vip_sst(z0(batch, n_cols, 0), r_l6vip)
+            I_l6i = I_l6i + self._disinhibition_scale * self.syn_l6_vip_sst(z0(batch, n_cols, 0), r_l6vip)
 
         r_l6e_new, r_l6i_new, ns_l6 = self._update_layer(
             self.l6_e, self.l6_i, I_l6e, I_l6i, state, "l6")

@@ -1,5 +1,5 @@
-# Phase 1e: full bio-plausible architecture on TinyStories — adds VIP disinhibition circuit.
-# Single variable change vs phase1d_adex: disinhibition on (VIP→SST→PC per layer).
+# Phase 1e: full bio-plausible architecture on TinyStories " adds VIP disinhibition circuit.
+# Single variable change vs phase1d_adex: disinhibition on (VIPSSTPC per layer).
 # No hippocampus. Completes the cortical column before the separate hippocampal module (1f).
 
 name: cortex-lm-phase1e-disinhibition
@@ -31,7 +31,7 @@ synapse:
 column:
   model: layered
   n_columns: 8
-  disinhibition: true         # VIP→SST→PC disinhibition circuit active
+  disinhibition: true         # VIPSSTPC disinhibition circuit active
   layer_sizes:
     l4:  {n_e: 16, n_i: 4}
     l23: {n_e: 32, n_i: 8}

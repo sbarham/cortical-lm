@@ -1,4 +1,4 @@
-# Phase 1b: layered cortical columns â€” same as minimal but with 4-layer column structure
+# Phase 1b: layered cortical columns " same as minimal but with 4-layer column structure
 # (L4, L2/3, L5, L6) instead of flat simple_ei.
 # Layer sizes chosen so L5 output (readout source) is 16E x 8 cols = 128-dim,
 # comparable to phase1a's 20E x 8 cols = 160-dim. Avoids the severe bottleneck
@@ -23,15 +23,15 @@ neuron:
   learn_taus: false
 
 synapse:
-  inter_column_stp: false   # STP off â€” isolate column structure effect
+  inter_column_stp: false   # STP off " isolate column structure effect
 
 column:
   model: layered
   n_columns: 8
   disinhibition: false
   layer_sizes:
-    l4:  {n_e: 16, n_i: 4}    # thalamic input layer â€” 16 fits 32-dim embedding without crushing
-    l23: {n_e: 32, n_i: 8}    # largest â€” association / recurrent
+    l4:  {n_e: 16, n_i: 4}    # thalamic input layer " 16 fits 32-dim embedding without crushing
+    l23: {n_e: 32, n_i: 8}    # largest " association / recurrent
     l5:  {n_e: 16, n_i: 4}    # output layer (readout source): 16 x 8 cols = 128-dim
     l6:  {n_e: 12, n_i: 3}    # feedback to thalamus
 
@@ -64,8 +64,8 @@ training:
   optimizer: adamw
   scheduler: cosine
   warmup_steps: 100
-  eval_tokens: 1_638_400    # every 200 steps @ batch=512 — auto-scales with batch_size
-  checkpoint_tokens: 32_768_000  # every 500 steps @ batch=512 — auto-scales with batch_size
+  eval_tokens: 1_638_400    # every 200 steps @ batch=512 -- auto-scales with batch_size
+  checkpoint_tokens: 32_768_000  # every 500 steps @ batch=512 -- auto-scales with batch_size
   seed: 42
 
 simulation:
@@ -73,4 +73,4 @@ simulation:
 
 logging:
   wandb: false
-  log_tokens: 1_638_400      # every 100 steps @ batch=512 — auto-scales with batch_size
+  log_tokens: 1_638_400      # every 100 steps @ batch=512 -- auto-scales with batch_size
