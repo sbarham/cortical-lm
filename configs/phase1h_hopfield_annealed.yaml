@@ -1,11 +1,23 @@
-# Phase 1f (no-disinhibition control): full bio-plausible architecture on TinyStories.
-# Identical to phase1f_hopfield but with disinhibition: false.
-# Isolates the Hopfield module's contribution cleanly:
-#   1f_no_disinhibition = AdEx + STP + Hopfield (no VIP circuit)
-#   1f_hopfield         = AdEx + STP + disinhibition + Hopfield
-# Comparing these two gives the net value of the VIP->SST->PC circuit.
+# Phase 1h: Hopfield + annealed disinhibitory window.
+# Single variable change vs phase1g_hopfield_disinhibition: disinhibition decays
+# linearly from 1->0 over the first 200M tokens, then stays off.
+#
+# Biological motivation: models the closure of a critical-period plasticity window.
+# Early high-plasticity window accelerates credit assignment; withdrawal of VIP->SST
+# gain as the cortex matures mirrors ocular dominance critical period closure.
+#
+# Prediction: best of both worlds -- fast early convergence (disinhibition helping
+# before Hopfield has learned useful memories) + clean late-training generalisation
+# (no VIP noise once Hopfield is mature).
+#
+# Annealing schedule: disinhibition_scale = max(0, 1 - tokens / 200M)
+#   tokens=0    -> scale=1.0 (full disinhibition)
+#   tokens=100M -> scale=0.5
+#   tokens=200M -> scale=0.0 (off for remaining 800M tokens)
+#
+# No apical pathway -- kept for the dedicated apical ablation series.
 
-name: cortex-lm-phase1f-no-disinhibition
+name: cortex-lm-phase1h-hopfield-annealed
 version: "0.1"
 
 data:
@@ -34,8 +46,8 @@ synapse:
 column:
   model: layered
   n_columns: 8
-  disinhibition: false        # VIP circuit OFF -- control for 1f_hopfield
-  apical_pathway: additive    # variant B -- best gradient health in factorial study
+  disinhibition: true
+  disinhibition_anneal_tokens: 200_000_000   # anneal VIP->SST gain 1->0 over first 200M tokens
   layer_sizes:
     l4:  {n_e: 16, n_i: 4}
     l23: {n_e: 32, n_i: 8}

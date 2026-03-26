@@ -1,6 +1,12 @@
-# Phase 1f: full bio-plausible architecture on TinyStories " adds Modern Hopfield hippocampus.
-# Extends phase1e_disinhibition: hippocampus on, disinhibition on.
-# Complete ablation endpoint before moving to wikitext103.
+# Phase 1f: adds Modern Hopfield hippocampal module.
+# Single variable change vs phase1e_disinhibition: hippocampus on, disinhibition OFF.
+#
+# Deliberately no VIP circuit here -- early results show disinhibition and Hopfield
+# interfere when combined (noisy cortical queries degrade HPC retrieval).  The clean
+# comparison is: which fast-learning mechanism is better, disinhibition (1e) or
+# hippocampus (1f)?  Phase 1g answers whether they can combine productively.
+#
+# No apical pathway -- kept for the dedicated apical ablation series.
 
 name: cortex-lm-phase1f-hopfield
 version: "0.1"
@@ -31,9 +37,7 @@ synapse:
 column:
   model: layered
   n_columns: 8
-  disinhibition: true         # VIPSSTPC disinhibition circuit (from 1e)
-  apical_pathway: additive    # variant B " best gradient health in factorial study
-                              # swap to multiplicative if variant C edges ahead on full run
+  disinhibition: false            # VIP circuit OFF -- isolates Hopfield contribution
   layer_sizes:
     l4:  {n_e: 16, n_i: 4}
     l23: {n_e: 32, n_i: 8}
@@ -67,7 +71,7 @@ learning:
 
 training:
   batch_size: 512
-  max_tokens: 1_000_000_000   # canonical Phase 1 budget
+  max_tokens: 1_000_000_000
   lr: 3.0e-4
   weight_decay: 1.0e-4
   grad_clip: 1.0

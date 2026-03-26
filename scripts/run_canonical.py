@@ -49,7 +49,7 @@ import time
 
 # ── Phase definitions ────────────────────────────────────────────────────────
 # Baselines are parameter-matched to the full system (phase 1f).
-BASELINE_CONFIG = "configs/phase1f_hopfield.yaml"
+BASELINE_CONFIG = "configs/phase1f_hopfield.yaml"   # parameter-matched to 1f (no apical)
 BASELINE_MODELS = ["rnn", "lstm", "lstm_attention", "transformer"]
 
 PHASES = [
@@ -57,10 +57,11 @@ PHASES = [
     ("1b", "configs/phase1b_layered.yaml"),
     ("1c", "configs/phase1c_stp.yaml"),
     ("1d", "configs/phase1d_adex.yaml"),
-    ("1e", "configs/phase1e_disinhibition.yaml"),
-    ("1f", "configs/phase1f_hopfield.yaml"),
-    ("1g", "configs/phase1g_annealed_disinhibition.yaml"),
-    ("1h", "configs/phase1h_ca1.yaml"),
+    ("1e", "configs/phase1e_disinhibition.yaml"),       # + VIP->SST->PC disinhibition
+    ("1f", "configs/phase1f_hopfield.yaml"),             # + Hopfield HPC (no disinhibition)
+    ("1g", "configs/phase1g_hopfield_disinhibition.yaml"),  # 1f + always-on disinhibition
+    ("1h", "configs/phase1h_hopfield_annealed.yaml"),   # 1f + annealed disinhibition
+    ("1i", "configs/phase1i_hopfield_ca1.yaml"),        # 1f + CA1 write-gating
 ]
 
 PHASE_IDS = [p for p, _ in PHASES]
