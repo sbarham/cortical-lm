@@ -90,7 +90,7 @@ hippocampus:
   model: none | modern_hopfield   # CA3-style Hopfield memory
 
 learning:
-  rule: bptt | eprop
+  rule: bptt | eprop_approx | eprop | eprop_hybrid
 
 data:
   dataset: tinystories | wikitext2 | wikitext103 | openwebtext | ptb
@@ -916,6 +916,113 @@ because there is a scaling story to tell.
 **What is needed before starting this:** Paper 2's answer to the parallelization question.
 At 1B parameters and full sequence length, BPTT through the current sequential column
 dynamics is not feasible.  Some form of parallel training is a prerequisite.
+
+---
+
+## Learning rule exploration
+
+Three learning rule variants are implemented, configurable via `learning.rule`:
+
+| Rule | Config value | Description |
+|---|---|---|
+| BPTT | `bptt` | Full backpropagation through time. Gold standard. |
+| e-prop (approx) | `eprop_approx` | Scalar learning signal `L(t) = mean|∂L/∂z|`. Crude eligibility traces. Fast, least biologically precise. |
+| e-prop (proper) | `eprop` | Vector `L_j(t) = ∂L/∂z_j` per L5 neuron. Directional credit via `Δw_ij ∝ L_j · ē_ij`. Closer to Bellec et al. 2020. |
+| e-prop hybrid | `eprop_hybrid` | Alternating e-prop (online) and brief BPTT consolidation bursts. See below. |
+
+### Hybrid e-prop: a sleep-wake analogy
+
+The hybrid trainer (`eprop_hybrid`) is motivated by Complementary Learning Systems theory
+(McClelland et al. 1995) and the hypothesis that sleep serves a memory consolidation function.
+
+**Awake phase (e-prop):** the model processes tokens online with local eligibility traces
+and a modulatory learning signal — analogous to waking synaptic potentiation driven by
+prediction error.  Credit assignment is local and causal; no future information is used.
+
+**Sleep/replay phase (BPTT):** periodically, a short burst of BPTT is run over a fixed
+replay window (default: 10 steps, every 100 e-prop steps).  This mimics hippocampal
+sharp-wave ripple replay during NREM sleep: a compressed, accelerated re-processing of
+recent experience that allows the global gradient to correct the slow, noisy online updates.
+
+The hypothesis: the architecture's biological inductive biases (STP, AdEx timescales,
+Hopfield episodic memory) reduce the amount of gradient precision needed, so a small amount
+of BPTT "sleep" can consolidate what e-prop's noisy "waking" updates approximate.  If true,
+the hybrid achieves near-BPTT performance with most of the biological learning rule
+properties intact.
+
+Key config options for the hybrid:
+
+```yaml
+learning:
+  rule: eprop_hybrid
+  hybrid_eprop_steps: 100      # e-prop steps per awake phase
+  hybrid_bptt_steps: 10        # BPTT steps per sleep phase
+  hybrid_bptt_scope: readout_only  # readout_only | full
+  hybrid_eprop_variant: eprop  # eprop | eprop_approx (inner awake rule)
+```
+
+`hybrid_bptt_scope: readout_only` restricts BPTT gradients to the readout head and
+inter-column weights, leaving intra-column dynamics to the local rule — the most
+biologically plausible configuration.
+
+### e-prop series script
+
+```bash
+# Step 1 — four-way comparison on 1f (find best variant)
+python scripts/run_eprop_series.py \
+    --tokenizer checkpoints/tokenizer.pkl \
+    --wandb --wandb-project cortex-lm --wandb-group eprop-YYYY-MM-DD \
+    --runs eprop_rough_cos_1f eprop_1f eprop_cos_1f
+
+# Step 2 — ablation with winning variant on 1a, 1d, 1f
+python scripts/run_eprop_series.py \
+    --tokenizer checkpoints/tokenizer.pkl \
+    --wandb --wandb-project cortex-lm --wandb-group eprop-YYYY-MM-DD \
+    --runs eprop_1d eprop_1a   # update rule/name overrides to winner first
+```
+
+### e-prop experiment results (150 M tokens, phase 1f, TinyStories, W&B: eprop-2026-03-25)
+
+All runs: batch=1024, seq_len=128, 1144 steps.  Val ppl reported at end of run.
+
+| Run | Rule | LR schedule | Train ppl | Val ppl | Notes |
+|---|---|---|---|---|---|
+| eprop-series-bptt-1f | bptt | cosine 3e-4 | 54 | 64 | Ceiling. Still descending at 150M tokens. |
+| eprop-rough-1f | eprop_approx | flat 1e-4 | 247 | 587 | **Val diverges** (~390→587 over training). Train descends slowly. |
+| eprop-rough-cos-1f | eprop_approx | cosine 1e-4 | — | — | *pending* |
+| eprop-1f | eprop | flat 1e-4 | — | — | *pending* |
+| eprop-cos-1f | eprop | cosine 1e-4 | — | — | *pending* |
+
+**Key finding (series 1):** Both `eprop_approx` and `eprop` (proper) show val ppl *diverging*
+throughout training while train ppl slowly decreases.  The scalar vs vector learning signal
+makes no difference — ruling out signal directionality as the cause.  The recurrent weight
+updates are harmful regardless of signal quality.
+
+### e-prop series 2 — diagnostics and fixes
+
+Four hypotheses for why recurrent e-prop updates hurt generalisation, each as a config flag:
+
+| Flag | Default | Hypothesis tested |
+|---|---|---|
+| `learning.freeze_recurrent: true` | false | *Diagnostic* — if val stops diverging, recurrent updates are definitively the cause |
+| `learning.adam_recurrent: true` | false | Direct `param -= lr*g` is poorly scaled vs Adam readout; per-parameter adaptivity may help |
+| `learning.dale_interval: N` | 1 | Dale clipping after every timestep immediately undoes each update; less frequent enforcement may let updates accumulate |
+| `learning.eprop_tau_e: N` | auto | Default trace timescale (geometric mean of tau_m range) may be mismatched; sweep short (2 ms) and long (50 ms) |
+
+```bash
+python scripts/run_eprop_series_2.py \
+    --tokenizer checkpoints/tokenizer.pkl \
+    --wandb --wandb-project cortex-lm --wandb-group eprop2-YYYY-MM-DD
+```
+
+| Run | Flags | Val ppl | Notes |
+|---|---|---|---|
+| eprop-freeze-1f | freeze_recurrent | — | *pending* |
+| eprop-adam-rec-1f | adam_recurrent | — | *pending* |
+| eprop-dale10-1f | dale_interval=10 | — | *pending* |
+| eprop-adam-dale-1f | adam_recurrent + dale_interval=10 | — | *pending* |
+| eprop-tau2-1f | eprop_tau_e=2 | — | *pending* |
+| eprop-tau50-1f | eprop_tau_e=50 | — | *pending* |
 
 ---
 

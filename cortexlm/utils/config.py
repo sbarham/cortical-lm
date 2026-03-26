@@ -168,7 +168,7 @@ def _validate_config(cfg: dict):
     valid_column_models = {"simple_ei", "layered"}
     valid_conn_types = {"gaussian_1d", "small_world", "random_sparse"}
     valid_hpc_models = {"none", "modern_hopfield"}
-    valid_learning_rules = {"bptt", "eprop"}
+    valid_learning_rules = {"bptt", "eprop", "eprop_approx", "eprop_hybrid"}
 
     assert cfg["data"]["dataset"] in valid_datasets, f"Unknown dataset: {cfg['data']['dataset']}"
     assert cfg["data"]["tokenizer"] in valid_tokenizers, f"Unknown tokenizer: {cfg['data']['tokenizer']}"

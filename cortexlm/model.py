@@ -94,6 +94,8 @@ class CortexLM(nn.Module):
             readout_dim = self.n_columns * (self.n_l5e + self.n_l23e)
 
         self.readout = ReadoutHead(readout_dim, vocab_size, config)
+        if config.get("readout", {}).get("weight_tying", False):
+            self.readout.tie_weights(self.embedding.weight)
         self.readout_source = readout_source
         self.dt = config.get("simulation", {}).get("dt", 1.0)
 
@@ -162,7 +164,10 @@ class CortexLM(nn.Module):
             hpc_state=model_state.hpc_state,
         )
 
-        logits = self._readout(layer_out, batch)
+        # Cache pre-readout input so e-prop trainer can re-run with grad enabled
+        # without recomputing the full recurrent step.
+        self._last_readout_input = self._compute_readout_input(layer_out, batch)
+        logits = self.readout(self._last_readout_input)
         return logits, new_state
 
     def _col_state_to_list(
@@ -196,6 +201,25 @@ class CortexLM(nn.Module):
         elif "r_e" in col_state:
             return col_state["r_e"].reshape(batch, -1)
         return torch.zeros(batch, self.n_columns * self.n_l5e, device=device)
+
+    def _compute_readout_input(
+        self, layer_out: Dict[str, torch.Tensor], batch: int
+    ) -> torch.Tensor:
+        """Return the pre-readout concatenated tensor [batch, readout_dim].
+
+        Mirrors _readout exactly but stops before calling self.readout, so
+        callers (e.g. e-prop trainer) can re-attach gradients to this tensor
+        and re-run the readout head independently.
+        """
+        if self.readout_source == "l5":
+            acts = layer_out.get("l5_out", layer_out.get("e_out"))
+        elif self.readout_source == "l23":
+            acts = layer_out.get("l23_out", layer_out.get("e_out"))
+        else:
+            l5  = layer_out.get("l5_out",  layer_out.get("e_out"))
+            l23 = layer_out.get("l23_out", layer_out.get("e_out"))
+            acts = torch.cat([l5, l23], dim=-1)
+        return acts.reshape(batch, -1)
 
     def _readout(
         self, layer_out: Dict[str, torch.Tensor], batch: int

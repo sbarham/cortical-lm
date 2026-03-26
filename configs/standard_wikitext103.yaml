@@ -1,14 +1,29 @@
-# Phase 2: standard configuration — full AdEx + STP + Modern Hopfield hippocampus + BPTT.
-# Primary experimental platform.
+# CortexLM on Wikitext-103 — exploratory scaling run.
+#
+# Architecture: best-guess from TinyStories ablation series.
+#   - Hopfield hippocampus (no disinhibition — VIP circuit interferes with HPC credit assignment)
+#   - Additive apical pathway (variant B — best gradient health in exploratory factorial)
+#   - No CA1 yet (pending phase 1i results on TinyStories)
+#
+# Parameter target: ~1M.  Verify with: python scripts/train.py --config configs/standard_wikitext103.yaml --count-params
+# Adjust layer sizes / Hopfield dims to hit target.
+#
+# Comparison: run our own transformer baseline at matched params via:
+#   python scripts/run_baselines.py --config configs/standard_wikitext103.yaml --models transformer --output wt103_baseline.json
+#
+# Note on published baselines: word-level WT103 benchmarks (AWD-LSTM ~33 ppl,
+# Transformer-XL ~18 ppl) use a ~267K vocab and are NOT directly comparable to
+# our BPE-4096 perplexities.  Use bits-per-byte as a universal metric, or compare
+# only against our own transformer baseline at matched params.
 
-name: cortex-lm-standard
+name: cortex-lm-wikitext103
 version: "0.1"
 
 data:
   dataset: wikitext103
   tokenizer: bpe
-  vocab_size: 4096
-  seq_len: 256
+  vocab_size: 8192
+  seq_len: 256                    # longer context for WT103's denser language
 
 neuron:
   model: rate_adex
@@ -29,23 +44,24 @@ synapse:
 
 column:
   model: layered
-  n_columns: 16
-  disinhibition: false
+  n_columns: 8
+  disinhibition: false            # VIP circuit OFF -- interferes with HPC credit assignment
+  apical_pathway: additive        # variant B: gated embed->L5E, best gradient health
   layer_sizes:
-    l4:  {n_e: 80,  n_i: 20}
-    l23: {n_e: 160, n_i: 40}
-    l5:  {n_e: 80,  n_i: 20}
-    l6:  {n_e: 80,  n_i: 20}
+    l4:  {n_e: 24, n_i: 6}
+    l23: {n_e: 48, n_i: 12}
+    l5:  {n_e: 24, n_i: 6}
+    l6:  {n_e: 16, n_i: 4}
 
 connectivity:
   type: gaussian_1d
   p_max: 0.7
-  sigma: 3.0
+  sigma: 2.0
 
 hippocampus:
   model: modern_hopfield
-  n_memories: 512
-  d_model: 256
+  n_memories: 256                 # 4x TinyStories -- more retrieval breadth
+  d_model: 256                    # 4x TinyStories -- richer memory representations
   beta: 1.0
   ca1: false
 
@@ -53,26 +69,27 @@ readout:
   source: l5
   n_layers: 2
   hidden_dim: 256
+  weight_tying: true              # output projection shares embedding matrix -- saves vocab_size*embed_dim params
 
 embedding:
-  dim: 64
+  dim: 64                         # 2x TinyStories -- larger token embedding
 
 learning:
   rule: bptt
-  truncated_bptt_k: 64
+  truncated_bptt_k: 64            # longer BPTT horizon for longer sequences
   reset_state_between_batches: false
 
 training:
-  batch_size: 128       # RTX 5060 Ti 8GB — larger model+seq_len; increase if VRAM headroom allows
-  max_steps: 20000      # ~655M tokens (128 * 256 * 20k)
+  batch_size: 64                  # conservative start -- adjust up if VRAM allows
+  max_tokens: 300_000_000         # ~3 passes through WT103 train split (~103M tokens)
   lr: 3.0e-4
   weight_decay: 1.0e-4
   grad_clip: 1.0
   optimizer: adamw
   scheduler: cosine
   warmup_steps: 200
-  eval_interval: 400
-  checkpoint_interval: 500
+  eval_tokens: 2_621_440          # evaluate every ~2.6M tokens
+  checkpoint_tokens: 26_214_400   # checkpoint every ~26M tokens
   seed: 42
 
 simulation:
@@ -80,7 +97,7 @@ simulation:
 
 logging:
   wandb: false
-  log_interval: 100
+  log_tokens: 655_360             # log every ~655K tokens (10x more frequent than eval)
   log_weight_stats: true
   log_tau_stats: true
   log_spike_rates: true

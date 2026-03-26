@@ -3,38 +3,36 @@
 scripts/run_canonical.py — Sequential canonical Phase 1 ablation runs.
 
 Each phase adds exactly one bio-plausible ingredient:
-    1a  simple_ei baseline
+    1a  simple_ei rate-neuron baseline
     1b  + layered cortical columns (L4/L23/L5/L6)
     1c  + Tsodyks-Markram short-term plasticity
     1d  + AdEx adaptive neurons
     1e  + VIP→SST→PC disinhibition circuit
-    1f  + Modern Hopfield hippocampal module  (full system)
+    1f  + Modern Hopfield hippocampal module (no disinhibition)
+    1g  1f + always-on disinhibition  (do they combine?)
+    1h  1f + annealed disinhibition   (critical-period plasticity)
+    1i  1f + CA1 write-gating         (no disinhibition)
 
 All runs log to the same W&B project and group so ablation curves can be
-overlaid on a shared tokens-seen axis. The tokenizer from Phase 1a is
-reused for 1b–1f so tokenisation is held constant across the series.
+overlaid on a shared tokens-seen axis.  The tokenizer from Phase 1a is
+reused for all subsequent phases so tokenisation is held constant.
 
 Usage
 -----
-# Full run (trains tokenizer in 1a, reuses for 1b–1f)
-python scripts/run_canonical.py --wandb-project cortex-lm-canonical
+# Full run from 1a → 1i
+python scripts/run_canonical.py --tokenizer checkpoints/tokenizer.pkl --wandb-project cortex-lm
 
-# Reuse a pre-trained tokenizer (recommended — skips BPE in every phase)
-python scripts/run_canonical.py \\
-    --tokenizer checkpoints/tokenizer.pkl \\
-    --wandb-project cortex-lm-canonical
+# Run only a range (e.g. rerun 1a–1d after correcting a bug)
+python scripts/run_canonical.py --tokenizer checkpoints/tokenizer.pkl --start-from 1a --end-at 1d
 
-# Override batch size to saturate an H100
-python scripts/run_canonical.py \\
-    --tokenizer checkpoints/tokenizer.pkl \\
-    --batch-size 2048 \\
-    --wandb-project cortex-lm-canonical
+# Resume mid-series
+python scripts/run_canonical.py --tokenizer checkpoints/tokenizer.pkl --start-from 1e
 
-# Resume from a specific phase after a partial run
-python scripts/run_canonical.py \\
-    --tokenizer checkpoints/tokenizer.pkl \\
-    --start-from 1c \\
-    --wandb-project cortex-lm-canonical
+# Specific phases only
+python scripts/run_canonical.py --phases 1a 1d 1f
+
+# Override batch size to saturate an A10/H100
+python scripts/run_canonical.py --tokenizer checkpoints/tokenizer.pkl --batch-size 2048
 
 # Dry run — print commands without executing
 python scripts/run_canonical.py --dry-run
@@ -145,8 +143,12 @@ def main() -> None:
         help=f"Start from this phase, skipping earlier ones. Choices: {PHASE_IDS}",
     )
     parser.add_argument(
+        "--end-at", default=None, choices=PHASE_IDS, metavar="PHASE",
+        help=f"Stop after this phase (inclusive). Choices: {PHASE_IDS}",
+    )
+    parser.add_argument(
         "--phases", nargs="+", choices=PHASE_IDS, metavar="PHASE",
-        help="Run only these specific phases (overrides --start-from)",
+        help="Run only these specific phases (overrides --start-from/--end-at)",
     )
     parser.add_argument(
         "--wandb-project", default="cortex-lm",
@@ -190,7 +192,8 @@ def main() -> None:
         phases_to_run = [(p, c) for p, c in PHASES if p in args.phases]
     else:
         start_idx = PHASE_IDS.index(args.start_from)
-        phases_to_run = PHASES[start_idx:]
+        end_idx = PHASE_IDS.index(args.end_at) + 1 if args.end_at else len(PHASES)
+        phases_to_run = PHASES[start_idx:end_idx]
 
     # Header
     print("\nCortexLM — canonical Phase 1 ablation series")
