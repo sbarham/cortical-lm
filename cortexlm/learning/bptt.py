@@ -5,7 +5,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts, LinearLR
 from typing import Optional, Tuple
 
 from cortexlm.model import CortexLM, ModelState
@@ -85,6 +85,15 @@ class BPTTTrainer:
 
         if sched_name == "cosine":
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max_steps - warmup)
+        elif sched_name == "sgdr":
+            # Cosine annealing with warm restarts.
+            # T_0: initial cycle length in steps (default: ~10% of run).
+            # T_mult: cycle length multiplier per restart (default: 2).
+            t0 = tcfg.get("sgdr_t0", max(50, (max_steps - warmup) // 10))
+            t_mult = tcfg.get("sgdr_t_mult", 2)
+            self.scheduler = CosineAnnealingWarmRestarts(
+                self.optimizer, T_0=t0, T_mult=t_mult
+            )
         elif sched_name == "linear":
             self.scheduler = LinearLR(self.optimizer, start_factor=1.0,
                                       end_factor=0.0, total_iters=max_steps)

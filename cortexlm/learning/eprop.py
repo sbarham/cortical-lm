@@ -43,15 +43,38 @@ class EligibilityTraceBuffer:
     """
     Eligibility trace for one weight matrix.
     ē_ij(t) = γ * ē_ij(t-1) + r_pre_i(t) * ψ_post_j(t)
+
+    Supports both the non-batched case (single column, n_cols=1) and the
+    batched case (n_cols > 1, one trace per column).
+
+    trace shape: [n_cols, n_post, n_pre]
+    grad property: returns trace squeezed to match W_e_raw.shape
+      - n_cols=1  → [n_post, n_pre]
+      - n_cols>1  → [n_cols, n_post, n_pre]
     """
-    def __init__(self, n_pre: int, n_post: int, gamma: float, device):
-        self.gamma = gamma
-        self.trace = torch.zeros(n_post, n_pre, device=device)
+    def __init__(self, n_pre: int, n_post: int, gamma: float, device, n_cols: int = 1):
+        self.gamma  = gamma
+        self.n_cols = n_cols
+        self.trace  = torch.zeros(n_cols, n_post, n_pre, device=device)
 
     def update(self, r_pre: torch.Tensor, psi_post: torch.Tensor):
-        """r_pre: [batch, n_pre]  psi_post: [batch, n_post]"""
-        delta = torch.einsum("bi,bj->ji", r_pre, psi_post) / r_pre.shape[0]
+        """
+        Non-batched: r_pre [B, n_pre],        psi_post [B, n_post]
+        Batched:     r_pre [B, n_cols, n_pre], psi_post [B, n_cols, n_post]
+        """
+        B = r_pre.shape[0]
+        if r_pre.dim() == 2:
+            # [1, n_post, n_pre]
+            delta = torch.einsum("bp,bq->qp", r_pre, psi_post).unsqueeze(0) / B
+        else:
+            # [n_cols, n_post, n_pre]
+            delta = torch.einsum("bcp,bcq->cqp", r_pre, psi_post) / B
         self.trace = self.gamma * self.trace + delta
+
+    @property
+    def grad(self) -> torch.Tensor:
+        """Trace in param-compatible shape: [n_post, n_pre] or [n_cols, n_post, n_pre]."""
+        return self.trace[0] if self.n_cols == 1 else self.trace
 
     def reset(self):
         self.trace.zero_()
@@ -95,13 +118,21 @@ class _EpropBase:
             if hasattr(self.model, "embedding") else None
         )
 
-        self.cosine_decay      = config["learning"].get("cosine_decay", False)
-        self._current_lr       = self.lr
+        self.cosine_decay        = config["learning"].get("cosine_decay", False)
+        self._current_lr         = self.lr
+        # normalize_l_signal: rescale L_vec to unit mean-abs before applying to traces.
+        # Prevents the learning signal from dying as the readout converges.
+        self.normalize_l_signal  = config["learning"].get("normalize_l_signal", False)
 
         # ── Series-2 diagnostic / fix flags ──────────────────────────────────
         # freeze_recurrent: skip all recurrent weight updates entirely.
         #   Diagnostic: if val divergence stops, the recurrent updates are the cause.
         self.freeze_recurrent  = config["learning"].get("freeze_recurrent", False)
+
+        # freeze_readout: skip readout + embedding optimizer steps entirely.
+        #   Diagnostic: if val divergence stops, the autograd readout path is the cause.
+        #   Recurrent weights still updated via e-prop traces.
+        self.freeze_readout    = config["learning"].get("freeze_readout", False)
 
         # adam_recurrent: use Adam (with moment estimates) for recurrent weight
         #   updates instead of direct param.data -= lr * g.  Gives adaptive per-
@@ -117,22 +148,47 @@ class _EpropBase:
         self._setup_traces()
         self._global_step = 0   # used by hybrid trainer for cycle tracking
 
+        # Diagnostic tracking — updated each train_step, logged at log_interval
+        self._last_l_signal   = 0.0  # mean |learning signal| over last step's timesteps
+        self._last_update_mag = 0.0  # mean |L × trace| gradient applied to recurrent weights
+
     def _setup_traces(self):
-        """Allocate eligibility traces (and Adam state if adam_recurrent) for all StaticSynapse modules."""
-        from cortexlm.synapses.static import StaticSynapse
-        self.param_traces: List[Tuple[nn.Parameter, EligibilityTraceBuffer]] = []
+        """
+        Allocate eligibility traces for all annotated synapse modules.
+
+        Handles both StaticSynapse (single column) and BatchedStaticSynapse
+        (multi-column).  Only modules that have eprop_pre_key / eprop_post_v_key
+        set are included — these are annotated in BatchedLayeredColumns.__init__.
+
+        param_traces entries: (param, buf, pre_key, post_v_key)
+        """
+        from cortexlm.synapses.static import StaticSynapse, BatchedStaticSynapse
+        self.param_traces: List[Tuple] = []
+
         for _, module in self.model.named_modules():
-            if isinstance(module, StaticSynapse) and module.n_pre_e > 0:
+            if not (hasattr(module, "eprop_pre_key") and hasattr(module, "eprop_post_v_key")):
+                continue
+            if isinstance(module, BatchedStaticSynapse) and module.n_pre_e > 0:
                 buf = EligibilityTraceBuffer(
-                    module.n_pre_e, module.n_post, self.gamma, self.device
+                    module.n_pre_e, module.n_post, self.gamma, self.device,
+                    n_cols=module.n_cols,
                 )
-                self.param_traces.append((module.W_e_raw, buf))
+                self.param_traces.append(
+                    (module.W_e_raw, buf, module.eprop_pre_key, module.eprop_post_v_key)
+                )
+            elif isinstance(module, StaticSynapse) and module.n_pre_e > 0:
+                buf = EligibilityTraceBuffer(
+                    module.n_pre_e, module.n_post, self.gamma, self.device,
+                )
+                self.param_traces.append(
+                    (module.W_e_raw, buf, module.eprop_pre_key, module.eprop_post_v_key)
+                )
 
         # Adam moment buffers for recurrent weights (only allocated if needed)
         if getattr(self, "adam_recurrent", False):
-            self._rec_m = {id(p): torch.zeros_like(p) for p, _ in self.param_traces}
-            self._rec_v = {id(p): torch.zeros_like(p) for p, _ in self.param_traces}
-            self._rec_t = {id(p): 0                   for p, _ in self.param_traces}
+            self._rec_m = {id(p): torch.zeros_like(p) for p, _, _, _ in self.param_traces}
+            self._rec_v = {id(p): torch.zeros_like(p) for p, _, _, _ in self.param_traces}
+            self._rec_t = {id(p): 0                   for p, _, _, _ in self.param_traces}
 
     def _psi(self, v: torch.Tensor) -> torch.Tensor:
         return 1.0 - torch.tanh(v) ** 2
@@ -162,20 +218,20 @@ class _EpropBase:
             param.data -= self._current_lr * g
 
     def _update_traces(self, new_state: ModelState):
-        """Update eligibility traces from column state activations."""
+        """
+        Update eligibility traces using the correct pre/post population per synapse.
+
+        Each param_traces entry carries (param, buf, pre_key, post_v_key) so we
+        look up the exact firing-rate and voltage tensors for that connection.
+        State tensors are [batch, n_cols, n] for batched columns.
+        """
         cs = new_state.column_states
-        r_e = cs.get("r_e", cs.get("r_l23e", None))
-        v_e = cs.get("e_v", cs.get("l23_e_v", None))
-        if r_e is None or v_e is None:
-            return
-        r_concat = r_e.reshape(r_e.shape[0], -1).detach()
-        psi = self._psi(v_e.reshape(v_e.shape[0], -1).detach())
-        for _, buf in self.param_traces:
-            n_pre  = buf.trace.shape[1]
-            n_post = buf.trace.shape[0]
-            r_slice   = r_concat[:, :n_pre]  if n_pre  <= r_concat.shape[1] else r_concat
-            psi_slice = psi[:, :n_post]      if n_post <= psi.shape[1]      else psi
-            buf.update(r_slice, psi_slice)
+        for _, buf, pre_key, post_v_key in self.param_traces:
+            r_pre = cs.get(pre_key)
+            v_post = cs.get(post_v_key)
+            if r_pre is None or v_post is None:
+                continue
+            buf.update(r_pre.detach(), self._psi(v_post.detach()))
 
     def train_step(
         self, x: torch.Tensor, y: torch.Tensor, state: Optional[ModelState]
@@ -211,17 +267,16 @@ class _EpropBase:
         ckpt_dir   = tcfg.get("checkpoint_dir", "checkpoints")
         seq_len    = self.config["data"].get("seq_len", 128)
 
-        # Eval interval: token-based if available, else ~20 points across run
+        # Eval interval: token-based if available, else same cadence as train logging.
         tokens_per_step = tcfg.get("batch_size", 512) * seq_len
-        eval_tokens = tcfg.get("eval_tokens", None)
+        log_tokens  = tcfg.get("log_tokens",  None)
+        eval_tokens = tcfg.get("eval_tokens", log_tokens)  # default: same as log cadence
         if eval_tokens is not None:
             eval_interval = max(1, eval_tokens // tokens_per_step)
+            log_interval  = max(1, (log_tokens or eval_tokens) // tokens_per_step)
         else:
             eval_interval = tcfg.get("eval_interval", max(1, max_steps // 20))
-
-        # e-prop steps are cheap — log train at the same cadence as eval so charts align.
-        # (BPTT's logging.log_interval: 100 is far too sparse for e-prop's step count.)
-        log_interval = eval_interval
+            log_interval  = eval_interval
         ckpt_interval = tcfg.get("checkpoint_interval", max_steps)
 
         import os
@@ -241,6 +296,8 @@ class _EpropBase:
 
             if state is None or self.reset_state:
                 state = self.model.init_state(x.shape[0])
+                for _, buf, _, _ in self.param_traces:
+                    buf.reset()
 
             self._global_step = step
 
@@ -256,11 +313,19 @@ class _EpropBase:
             tokens_seen += x.shape[0] * seq_len
 
             if logger and step % log_interval == 0:
-                logger.log({
+                log_dict = {
                     "train/loss":       loss,
                     "train/perplexity": compute_perplexity(loss),
                     "tokens":           tokens_seen,
-                }, step=step)
+                }
+                if self.param_traces:
+                    with torch.no_grad():
+                        trace_norms = [buf.grad.abs().mean().item()
+                                       for _, buf, _, _ in self.param_traces]
+                    log_dict["eprop/trace_norm_mean"] = sum(trace_norms) / len(trace_norms)
+                    log_dict["eprop/l_signal"]        = self._last_l_signal
+                    log_dict["eprop/update_mag"]      = self._last_update_mag
+                logger.log(log_dict, step=step)
 
             if step % eval_interval == 0:
                 val_loss = self.evaluate(val_loader)
@@ -288,7 +353,7 @@ class EpropApproxTrainer(_EpropBase):
     Fast approximate e-prop.
 
     Learning signal: scalar L(t) = mean|∂loss/∂z| broadcast to all synapses.
-    Eligibility traces: crude concat-and-slice (pre/post identity ignored).
+    Eligibility traces: correct per-synapse pre/post identity (same as EpropTrainer).
 
     Use for quick sanity checks. Not faithful to the Bellec et al. formulation.
     """
@@ -299,6 +364,7 @@ class EpropApproxTrainer(_EpropBase):
         if state is None:
             state = self.model.init_state(batch)
         total_loss = 0.0
+        l_acc, update_acc, update_n = 0.0, 0.0, 0
 
         for t in range(seq_len):
             state = state.detach()
@@ -312,22 +378,34 @@ class EpropApproxTrainer(_EpropBase):
             total_loss += loss.item()
 
             L_scalar = ri.grad.abs().mean().item()
+            l_acc += L_scalar
+            if self.normalize_l_signal:
+                L_scalar = 1.0
 
             nn.utils.clip_grad_norm_(self.model.readout.parameters(), self.grad_clip)
-            self.readout_optimizer.step(); self.readout_optimizer.zero_grad()
-            if self.embed_optimizer:
-                self.embed_optimizer.step(); self.embed_optimizer.zero_grad()
+            if not self.freeze_readout:
+                self.readout_optimizer.step(); self.readout_optimizer.zero_grad()
+                if self.embed_optimizer:
+                    self.embed_optimizer.step(); self.embed_optimizer.zero_grad()
+            else:
+                self.readout_optimizer.zero_grad()
+                if self.embed_optimizer:
+                    self.embed_optimizer.zero_grad()
 
             if not self.freeze_recurrent:
                 self._update_traces(new_state)
                 with torch.no_grad():
-                    for param, buf in self.param_traces:
-                        g = (L_scalar * buf.trace).clamp(-self.grad_clip, self.grad_clip)
+                    for param, buf, _, _ in self.param_traces:
+                        g = (L_scalar * buf.grad).clamp(-self.grad_clip, self.grad_clip)
                         self._apply_recurrent_update(param, g)
+                        update_acc += g.abs().mean().item()
+                        update_n   += 1
                 self._maybe_enforce_dale()
 
             state = new_state
 
+        self._last_l_signal   = l_acc / seq_len
+        self._last_update_mag = update_acc / max(update_n, 1)
         return total_loss / seq_len, state
 
 
@@ -354,6 +432,7 @@ class EpropTrainer(_EpropBase):
         if state is None:
             state = self.model.init_state(batch)
         total_loss = 0.0
+        l_acc, update_acc, update_n = 0.0, 0.0, 0
 
         for t in range(seq_len):
             state = state.detach()
@@ -369,24 +448,58 @@ class EpropTrainer(_EpropBase):
 
             # L_j(t): mean over batch → [readout_dim]
             L_vec = ri.grad.detach().mean(dim=0)   # [readout_dim]
+            l_acc += ri.grad.detach().abs().mean().item()  # log pre-average magnitude
+            if self.normalize_l_signal:
+                L_vec = L_vec / (L_vec.abs().mean() + 1e-8)
 
             nn.utils.clip_grad_norm_(self.model.readout.parameters(), self.grad_clip)
-            self.readout_optimizer.step(); self.readout_optimizer.zero_grad()
-            if self.embed_optimizer:
-                self.embed_optimizer.step(); self.embed_optimizer.zero_grad()
+            if not self.freeze_readout:
+                self.readout_optimizer.step(); self.readout_optimizer.zero_grad()
+                if self.embed_optimizer:
+                    self.embed_optimizer.step(); self.embed_optimizer.zero_grad()
+            else:
+                self.readout_optimizer.zero_grad()
+                if self.embed_optimizer:
+                    self.embed_optimizer.zero_grad()
 
             if not self.freeze_recurrent:
                 self._update_traces(new_state)
                 with torch.no_grad():
-                    for param, buf in self.param_traces:
-                        n_post = buf.trace.shape[0]
-                        L_post = L_vec[:n_post] if n_post <= L_vec.shape[0] else L_vec
-                        g = (L_post.unsqueeze(1) * buf.trace).clamp(-self.grad_clip, self.grad_clip)
+                    # For L5E post-synaptic neurons, use the per-neuron vector learning
+                    # signal L_j = ∂loss/∂z_j reshaped to [n_cols, n_l5e].
+                    # For all other post populations, fall back to scalar approximation.
+                    n_l5e  = getattr(self.model, "n_l5e", None)
+                    n_cols = getattr(self.model, "n_columns", 1)
+                    L_mat  = None
+                    if n_l5e is not None and n_cols > 1:
+                        try:
+                            L_mat = L_vec.reshape(n_cols, n_l5e)   # [n_cols, n_l5e]
+                        except RuntimeError:
+                            pass
+
+                    for param, buf, _, post_v_key in self.param_traces:
+                        trace = buf.grad  # [n_post, n_pre] or [n_cols, n_post, n_pre]
+                        if L_mat is not None and post_v_key == "l5_e_v" and buf.n_cols > 1:
+                            # Per-column, per-neuron credit: [n_cols, n_l5e, n_pre]
+                            g = torch.einsum("cn,cnp->cnp", L_mat, trace)
+                        elif trace.dim() == 3:
+                            # Batched non-L5E post: scalar approximation per column
+                            g = L_vec.abs().mean() * trace
+                        else:
+                            # Non-batched fallback (original behaviour)
+                            n_post = trace.shape[0]
+                            L_post = L_vec[:n_post] if n_post <= L_vec.shape[0] else L_vec
+                            g = L_post.unsqueeze(1) * trace
+                        g = g.clamp(-self.grad_clip, self.grad_clip)
                         self._apply_recurrent_update(param, g)
+                        update_acc += g.abs().mean().item()
+                        update_n   += 1
                 self._maybe_enforce_dale()
 
             state = new_state
 
+        self._last_l_signal   = l_acc / seq_len
+        self._last_update_mag = update_acc / max(update_n, 1)
         return total_loss / seq_len, state
 
 
@@ -441,6 +554,20 @@ class EpropHybridTrainer(_EpropBase):
         self.bptt_scope   = lcfg.get("hybrid_bptt_scope", "readout_only")
         variant           = lcfg.get("hybrid_eprop_variant", "eprop")
 
+        # Adaptive BPTT: trigger consolidation based on plateau detection rather
+        # than a fixed cycle.  Enabled when hybrid_adaptive=true.
+        #   plateau_window  — steps over which to measure improvement (EMA half-life)
+        #   plateau_thresh  — fractional improvement below which BPTT triggers
+        #   plateau_cooldown — minimum steps between BPTT bursts
+        self.adaptive          = lcfg.get("hybrid_adaptive", False)
+        self.plateau_window    = lcfg.get("hybrid_plateau_window", 500)
+        self.plateau_thresh    = lcfg.get("hybrid_plateau_thresh", 0.005)  # 0.5% improvement
+        self.plateau_cooldown  = lcfg.get("hybrid_plateau_cooldown", 200)
+        self._loss_ema         = None   # initialised on first step
+        self._loss_ema_prev    = None   # EMA snapshot taken plateau_window steps ago
+        self._steps_since_bptt = 0
+        self._bptt_steps_remaining = 0  # countdown during an adaptive burst
+
         # Inner e-prop trainer (shares model + traces with this instance)
         if variant == "eprop_approx":
             self._eprop = EpropApproxTrainer.__new__(EpropApproxTrainer)
@@ -449,9 +576,12 @@ class EpropHybridTrainer(_EpropBase):
         # Share all state — don't re-init, just bind
         self._eprop.__dict__ = self.__dict__
 
-        # Full-model optimizer for BPTT consolidation steps
+        # Full-model optimizer for BPTT consolidation steps.
+        # Uses a separate LR so consolidation doesn't overwrite e-prop's incremental
+        # updates.  Default: same as e-prop LR; override with hybrid_bptt_lr.
+        bptt_lr = lcfg.get("hybrid_bptt_lr", self.lr)
         self.full_optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=self.lr,
+            self.model.parameters(), lr=bptt_lr,
             weight_decay=config["training"].get("weight_decay", 1e-4),
         )
 
@@ -462,11 +592,46 @@ class EpropHybridTrainer(_EpropBase):
     def _in_bptt_phase(self) -> bool:
         return (self._global_step % self._cycle_len) >= self.eprop_steps
 
+    def _update_plateau_detection(self, loss: float) -> bool:
+        """
+        Update EMA and return True if a BPTT burst should be triggered.
+        Uses two EMAs separated by plateau_window steps to measure improvement rate.
+        """
+        alpha = 2.0 / (self.plateau_window + 1)
+        if self._loss_ema is None:
+            self._loss_ema = loss
+            self._loss_ema_prev = loss
+            return False
+        self._loss_ema = alpha * loss + (1 - alpha) * self._loss_ema
+
+        # Snapshot the slow EMA every plateau_window steps for comparison
+        if self._global_step % self.plateau_window == 0:
+            improvement = (self._loss_ema_prev - self._loss_ema) / (self._loss_ema_prev + 1e-8)
+            self._loss_ema_prev = self._loss_ema
+            if improvement < self.plateau_thresh and self._steps_since_bptt >= self.plateau_cooldown:
+                return True  # plateau detected
+        return False
+
     def train_step(self, x, y, state):
+        if self.adaptive:
+            return self._adaptive_train_step(x, y, state)
         if self._in_bptt_phase():
             return self._bptt_consolidation_step(x, y, state)
         else:
             return self._eprop.train_step(x, y, state)
+
+    def _adaptive_train_step(self, x, y, state):
+        """Adaptive hybrid: run e-prop normally, trigger BPTT bursts on plateau."""
+        if self._bptt_steps_remaining > 0:
+            self._bptt_steps_remaining -= 1
+            self._steps_since_bptt = 0
+            loss, state = self._bptt_consolidation_step(x, y, state)
+        else:
+            loss, state = self._eprop.train_step(x, y, state)
+            self._steps_since_bptt += 1
+            if self._update_plateau_detection(loss):
+                self._bptt_steps_remaining = self.bptt_steps  # start a burst
+        return loss, state
 
     def _bptt_consolidation_step(self, x, y, state):
         x, y = x.to(self.device), y.to(self.device)
@@ -482,6 +647,9 @@ class EpropHybridTrainer(_EpropBase):
             loss.backward()
             nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
             self.full_optimizer.step()
+            # Traces are now stale (weights changed) — reset so e-prop resumes cleanly.
+            for _, buf, _, _ in self.param_traces:
+                buf.reset()
             return loss.item(), new_state
 
         else:
@@ -509,5 +677,9 @@ class EpropHybridTrainer(_EpropBase):
             self.readout_optimizer.step()
             if self.embed_optimizer:
                 self.embed_optimizer.step()
+            # Reset traces — readout shift changes the l_signal landscape so old
+            # traces are mismatched to the new gradient direction.
+            for _, buf, _, _ in self.param_traces:
+                buf.reset()
 
             return loss.item(), cur_state

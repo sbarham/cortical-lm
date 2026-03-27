@@ -318,6 +318,34 @@ class BatchedLayeredColumns(nn.Module):
         self.syn_l6e_l4e   = BatchedStaticSynapse(n_cols, self.n_l6e,  0, self.n_l4e)
         self.syn_l6e_l4i   = BatchedStaticSynapse(n_cols, self.n_l6e,  0, self.n_l4i)
 
+        # ── E-prop eligibility trace annotations ─────────────────────────────
+        # Each synapse with n_pre_e > 0 gets (eprop_pre_key, eprop_post_v_key) so that
+        # _update_traces in eprop.py can look up the correct pre/post activations.
+        # State key conventions:  firing rate → "r_{layer}{pop}"  (e.g. "r_l4e")
+        #                         membrane voltage → "{layer}_{pop}_v" (e.g. "l4_e_v")
+        for syn, pre_key, post_v_key in [
+            (self.syn_l4_ee,    "r_l4e",   "l4_e_v"),
+            (self.syn_l4_ei,    "r_l4e",   "l4_i_v"),
+            (self.syn_l23_ee,   "r_l23e",  "l23_e_v"),
+            (self.syn_l23_ei,   "r_l23e",  "l23_i_v"),
+            (self.syn_l5_ee,    "r_l5e",   "l5_e_v"),
+            (self.syn_l5_ei,    "r_l5e",   "l5_i_v"),
+            (self.syn_l6_ee,    "r_l6e",   "l6_e_v"),
+            (self.syn_l6_ei,    "r_l6e",   "l6_i_v"),
+            (self.syn_l4e_l23e, "r_l4e",   "l23_e_v"),
+            (self.syn_l4e_l23i, "r_l4e",   "l23_i_v"),
+            (self.syn_l4e_l5e,  "r_l4e",   "l5_e_v"),
+            (self.syn_l23e_l5e, "r_l23e",  "l5_e_v"),
+            (self.syn_l23e_l5i, "r_l23e",  "l5_i_v"),
+            (self.syn_l23e_l6e, "r_l23e",  "l6_e_v"),
+            (self.syn_l5e_l6e,  "r_l5e",   "l6_e_v"),
+            (self.syn_l5e_l6i,  "r_l5e",   "l6_i_v"),
+            (self.syn_l6e_l4e,  "r_l6e",   "l4_e_v"),
+            (self.syn_l6e_l4i,  "r_l6e",   "l4_i_v"),
+        ]:
+            syn.eprop_pre_key  = pre_key
+            syn.eprop_post_v_key = post_v_key
+
         # ── Optional apical pathway ───────────────────────────────────────────
         apical_mode = config["column"].get("apical_pathway", "none")
         if apical_mode != "none":

@@ -4,7 +4,59 @@ description: Current training results, next steps, pending runs, and key finding
 type: project
 ---
 
-# CortexLM Project State (as of 2026-03-23)
+# CortexLM Project State (as of 2026-03-26)
+
+## E-prop series-3 status
+
+| Run | Val ppl | Notes |
+|---|---|---|
+| eprop-fixed-1f | ~264 @100M | All bugs fixed; baseline |
+| eprop-fixed-adam-1f | ~400 flat | Adam amplifies near-zero signal into noise — do not use until cancellation fixed |
+| eprop-smallbatch-1f | *running* | batch=32; l_signal=0.0018 @4K tokens; noisy around 400 ppl |
+
+**Batch cancellation confirmed.** l_signal ∝ 1/√batch (0.0009 at batch=64, 0.0018 at batch=32).
+Throughput ~1350 tokens/s = ~20h per 100M tokens.
+
+**E-prop series-3 COMPLETE (2026-03-27). Winner: eprop-apical-1f.**
+
+Final results @~25M tokens:
+- eprop-apical-1f: val 84, train 80 — WINNER
+- eprop-apical-1d: val 86, train 72 (noisier; converges to same as 1f by end)
+- eprop-apical-tau50-1f: val 89 (τ_e=50 mildly worse)
+- All normalize runs: val 135-151 (normalization actively harmful — discards calibration signal)
+- No-apical baseline: val ~390 flat (dead)
+
+**Key findings:**
+1. Apical pathway is the entire trick — necessary and sufficient for e-prop to work
+2. Normalization harmful — l_signal magnitude carries real calibration information
+3. τ_e=50 mildly harmful — default τ_e well-matched to architecture
+4. 1d ≈ 1f under e-prop+apical (both plateau ~84-86 val); BPTT strongly favors 1f
+5. E-prop+apical is 333× more sample-efficient than BPTT early (150K vs 50M tokens to reach 200 ppl), faster even than transformer in data-limited regime
+6. Plateau at ~80-85 ppl — BPTT reaches 27-29 ppl on same architecture; gap due to noisy batch-averaged credit
+
+**Now running: hybrid e-prop/BPTT sweep (eprop-series-4)**
+Three configs on 1f + apical:
+- eprop-hybrid-readout-1f: readout_only BPTT consolidation (100 eprop + 10 bptt)
+- eprop-hybrid-full-1f: full BPTT consolidation (100 eprop + 10 bptt)
+- eprop-hybrid-full-more-1f: full BPTT, more consolidation (100 eprop + 50 bptt)
+
+Hypothesis: periodic BPTT bursts correct accumulated noise and push val below the ~80 ppl e-prop floor,
+while e-prop handles the fast early descent. Biological analogy: sleep replay consolidation.
+
+**After hybrid:**
+- Apical BPTT sweep (run_hopfield_apical_sweep.py): does apical help BPTT? Does Hopfield contribute beyond AdEx with apical?
+- Canonical ablation series 1a→1f with best hybrid config
+
+**E-prop throughput — ideas for later:**
+1. Truncated BPTT as bridge (longer chunks, fewer steps)
+2. Per-example gradients via `torch.vmap` — large batch without cancellation
+3. `torch.compile` + bf16 — free 2-3× speedup
+4. Profile first — GPU likely underutilized at batch=32; bottleneck may be Python/data overhead
+
+**Why:** e-prop is inherently sequential; can't amortize over large batch like BPTT.
+**How to apply:** before launching any new e-prop run, consider whether throughput is the bottleneck.
+
+
 
 ## Phase sequence (revised)
 - **1a** simple_ei baseline

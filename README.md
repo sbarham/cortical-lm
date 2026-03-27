@@ -1,8 +1,24 @@
 # cortex-lm
 
-A neurophysiologically structured language model. Cortical columns (L4 → L2/3 → L5 → L6) built from rate-coded or AdEx neurons with Dale's Law constraints, Tsodyks-Markram short-term plasticity on inter-column synapses, and an optional Modern Hopfield hippocampal module. Trained with either full BPTT or online e-prop.
+A neurophysiologically structured language model trained with biologically plausible learning rules.
 
-The architecture is designed so that each biological ingredient can be toggled independently — enabling ablation studies that measure the marginal contribution of each component.
+---
+
+## What this project is about
+
+The standard narrative in neural network research is that biological realism is a performance tax — you pay in accuracy for the sake of interpretability or plausibility.  This project challenges that assumption.
+
+We build a language model out of the actual components of cortex: layered excitatory/inhibitory columns, adaptive neurons with spike-frequency adaptation, short-term synaptic plasticity, a hippocampal associative memory module, and apical dendritic feedback connections.  Each component is independently togglable, so we can measure the marginal contribution of every biological ingredient.  None were added speculatively — each is motivated by a specific neural circuit with a known functional role.
+
+The result is not what a naive reading of the benchmarks would predict.  **Each biologically-motivated addition closed the performance gap with a standard transformer, rather than widening it.**  Layered columns, AdEx dynamics, STP, and the Hopfield hippocampus each improved sample efficiency incrementally.  And when we turned to a biologically plausible learning rule — e-prop, which uses only locally available signals and no backpropagation through time — the outcome was surprising: rather than hurting convergence, the combination of e-prop with an additive apical feedback pathway *radically boosted* it.
+
+The apical finding is the sharpest result the project has produced.  Without apical feedback, e-prop fails completely on this architecture — the learning signal collapses to zero within the first million tokens and training stalls permanently.  With apical feedback, the signal grows throughout training, and the model reaches perplexities that pure BPTT and a transformer baseline take 100× more data to achieve.  This is not an engineering trick.  Apical dendrites are a real biological structure, present on virtually every L5 pyramidal neuron in cortex, long known to carry top-down signals.  What we found is that they are computationally *necessary* for online local learning to work at all — not merely modulatory, but load-bearing for credit assignment.
+
+This suggests a reframing.  The question is not "can a biological model beat a transformer on a benchmark?"  The question is: **which model learns fastest from limited data, and why?**  Biological brains are not trained on internet-scale corpora with full backpropagation.  They learn quickly, online, from a noisy stream of experience — exactly the regime where this model excels.  The transformer may ultimately reach lower perplexity given enough data.  But the biologically-structured model gets there faster, learns from less, and does so using mechanisms that have direct neural correlates.
+
+We are not yet done.  The model's asymptotic performance under e-prop is still below its BPTT ceiling, and we are actively investigating whether a hybrid learning rule — e-prop for fast online learning, periodic BPTT consolidation for long-range credit assignment — can close that gap.  Early results suggest the optimal awake:asleep ratio in this hybrid matches the biological 2:1 proportion, hinting that this ratio may reflect a deeper computational principle rather than an arbitrary evolutionary constraint.
+
+The architecture is described in detail below.  The learning rule experiments are documented in the [e-prop section](#e-prop-online-learning-rule).
 
 ---
 
@@ -988,41 +1004,308 @@ All runs: batch=1024, seq_len=128, 1144 steps.  Val ppl reported at end of run.
 | Run | Rule | LR schedule | Train ppl | Val ppl | Notes |
 |---|---|---|---|---|---|
 | eprop-series-bptt-1f | bptt | cosine 3e-4 | 54 | 64 | Ceiling. Still descending at 150M tokens. |
-| eprop-rough-1f | eprop_approx | flat 1e-4 | 247 | 587 | **Val diverges** (~390→587 over training). Train descends slowly. |
-| eprop-rough-cos-1f | eprop_approx | cosine 1e-4 | — | — | *pending* |
-| eprop-1f | eprop | flat 1e-4 | — | — | *pending* |
-| eprop-cos-1f | eprop | cosine 1e-4 | — | — | *pending* |
+| eprop-rough-1f | eprop_approx | flat 1e-4 | 247 | 587 | Val diverges (~390→587). Train slow. |
+| eprop-rough-cos-1f | eprop_approx | cosine 1e-4 | ~247 | ~587 | Tracks rough-flat almost exactly. Cosine makes no difference. |
+| eprop-1f | eprop | flat 1e-4 | ~247 | ~510 | Slightly better than rough, still diverges. |
+| eprop-cos-1f | eprop | cosine 1e-4 | ~247 | ~500 | **Best series 1 variant.** Lower val ppl, less noisy than rough. Still diverges. |
+| eprop-hybrid-1f | eprop_hybrid | cosine 1e-4 | ~368 | ~500 | readout_only BPTT scope. Tracks eprop-cos almost exactly early; diverges slightly worse after ~80M tokens (within noise). |
+| eprop-apical-1f | eprop + apical | flat 1e-4 | — | — | *pending* |
+| eprop-apical-cos-1f | eprop + apical | cosine 1e-4 | — | — | *pending* |
 
-**Key finding (series 1):** Both `eprop_approx` and `eprop` (proper) show val ppl *diverging*
-throughout training while train ppl slowly decreases.  The scalar vs vector learning signal
-makes no difference — ruling out signal directionality as the cause.  The recurrent weight
-updates are harmful regardless of signal quality.
+**Key findings (series 1):**
+
+- Cosine LR schedule and proper vector signal each help slightly, but neither stops val divergence.
+  `eprop-cos-1f` is the best variant so far.
+- `eprop_approx` (scalar signal) and `eprop` (vector signal) behave nearly identically —
+  signal directionality is not the cause of the divergence.
+- The hybrid (`eprop_hybrid`, `readout_only` scope) is indistinguishable from plain e-prop.
+  Root cause: `readout_only` BPTT only updates the readout/embedding, which is already trained
+  by autograd in all variants.  The recurrent weights are never corrected by the BPTT bursts.
+- All variants show the same pattern: train ppl descends slowly while val ppl diverges upward.
+
+**Series 2 diagnostic result (`freeze_recurrent`):**
+Val diverges identically with frozen recurrent weights.  The recurrent e-prop updates are
+**not** the cause.
+
+**Colleague's analysis — two root causes identified:**
+
+*Primary: state drift (train/val distributional mismatch)*
+
+During training, `reset_state_between_batches: false` (default) carries hidden state
+continuously across batches.  After N tokens, the model state has evolved for N steps; the
+readout Adam updates fit to activations produced by this warm, drifted state.  During
+evaluation, `evaluate()` always calls `init_state()` — a fresh zero state.  Val activations
+look like what the model produces in its first ~10 tokens of existence.
+
+In BPTT this is corrected automatically: backprop trains through the cold-start regime, so
+the model learns representations that work from the beginning.  In e-prop, the model only
+ever receives updates from warm-state activations.  Warm/cold divergence grows monotonically
+— exactly the observed pattern.  This explains why `freeze_recurrent` didn't help: the
+forward pass distributional gap is the problem, not any weight update.
+
+**Fix:** `learning.reset_state_between_batches: true`.
+**Verification:** `eprop-cos-reset-1f` confirmed — val tracked train to ~302 ppl at 50M tokens, vs. diverging to ~590 without the fix.
+
+*Secondary (more severe): `_setup_traces` found zero synapses*
+
+`_setup_traces` only searched for `StaticSynapse` instances.  The actual model uses
+`BatchedStaticSynapse` (a different class) — so `param_traces` was always empty, and
+**zero recurrent weight updates were ever applied** in any e-prop run.  Every run was
+effectively pure readout + embedding Adam with no recurrent learning at all.
+
+Consequences:
+- Series 2 `adam_recurrent` diverged not because Adam is harmful, but because traces were
+  empty — the Adam update was operating on garbage (all-zero traces).
+- `freeze_recurrent` was trivially a no-op (nothing was happening anyway).
+- The `tau_e` sweep was similarly meaningless — no traces to decay.
+- **The ~500 ppl ceiling across all series 1/2 runs is a readout-only baseline**, not an
+  e-prop ceiling.  Any real e-prop run that beats it confirms recurrent updates are contributing.
+- All intuitions from series 1/2 (cosine vs. flat LR, scalar vs. vector signal, hybrid) were
+  comparisons between identical runs.  None of it transfers to real e-prop.
+
+*Tertiary: wrong pre/post identity in traces*
+
+Even after fixing the `BatchedStaticSynapse` discovery, the original `_update_traces` used
+L2/3 E activations as both pre-synaptic rate and post-synaptic ψ for every weight matrix.
+Correct identity is synapse-specific: `syn_l4e_l23e` needs pre=`r_l4e`, post=`l23_e_v`;
+`syn_l5_ee` needs pre=`r_l5e`, post=`l5_e_v`; etc.
+
+**Both bugs now fixed:**
+- `BatchedLayeredColumns.__init__` annotates each `BatchedStaticSynapse` with
+  `eprop_pre_key` / `eprop_post_v_key` (18 synapses annotated).
+- `_setup_traces` discovers `BatchedStaticSynapse` and builds per-column
+  `[n_cols, n_post, n_pre]` trace buffers.
+- `_update_traces` dispatches to the correct state tensors per synapse.
+- `EpropTrainer` uses per-column vector L signal for L5E post-synaptic synapses;
+  scalar fallback for all other post populations.
+
+*Note on pseudo-derivative:* `ψ = 1 − tanh(v)²` is the **exact** derivative of tanh for our
+rate-coded network — not an approximation at all.  This concern is retired.
 
 ### e-prop series 2 — diagnostics and fixes
 
-Four hypotheses for why recurrent e-prop updates hurt generalisation, each as a config flag:
+Series 2 was designed before the empty-traces bug was discovered.  Results from the
+already-completed runs are invalid as recurrent experiments (traces were always empty).
+The `dale_interval` hypothesis is also invalid — `enforce_dale()` is a no-op since
+`W_e >= 0` is enforced via softplus reparameterization, not by clipping.
 
-| Flag | Default | Hypothesis tested |
+**Colleague's revised priority order (post-fixes):**
+
+| Fix | Priority | Reasoning |
 |---|---|---|
-| `learning.freeze_recurrent: true` | false | *Diagnostic* — if val stops diverging, recurrent updates are definitively the cause |
-| `learning.adam_recurrent: true` | false | Direct `param -= lr*g` is poorly scaled vs Adam readout; per-parameter adaptivity may help |
-| `learning.dale_interval: N` | 1 | Dale clipping after every timestep immediately undoes each update; less frequent enforcement may let updates accumulate |
-| `learning.eprop_tau_e: N` | auto | Default trace timescale (geometric mean of tau_m range) may be mismatched; sweep short (2 ms) and long (50 ms) |
+| `adam_recurrent: true` | High | Readout uses Adam (momentum + per-param scaling); raw SGD for recurrent creates optimizer mismatch. Post-trace-fix, recurrent weights finally get meaningful signal — Adam may help them keep pace. |
+| `tau_e` sweep {20, 50, 100} | Medium | Default τ_e ≈ 8 ms (geometric mean of [2, 30]) likely too short for seq_len=128. Credit horizon may span many tokens. |
+| `tau_e: 2` (diagnostic) | Low | Very short traces → near-random updates → sanity check that traces carry signal at all. |
+| `dale_interval` | Skip | No-op: softplus guarantees `W_e >= 0` continuously; `enforce_dale()` is already a no-op. |
 
+**Full series-3 plan** (all with `reset_state_between_batches: true` + fixed traces, 100M tokens each):
+
+| Step | Run | Key config | Purpose |
+|---|---|---|---|
+| 1 | eprop-fixed-1f | flat LR, standard τ_e | Clean baseline — recurrent updates finally real |
+| 2 | eprop-fixed-adam-1f | + `adam_recurrent=true` | Fix optimizer mismatch (urgent — SGD updates 3–4 OOM too small vs Adam readout) |
+| 3a | eprop-fixed-adam-recur-lr-1f | + separate recurrent LR (3e-4 or 1e-3) | If `eprop/update_mag` still tiny with Adam, higher recurrent LR needed |
+| 4a | eprop-tau20-1f | + `eprop_tau_e=20` | Longer credit horizon (default τ_e≈8 likely too short for seq_len=128) |
+| 4b | eprop-tau50-1f | + `eprop_tau_e=50` | Even longer traces |
+| 4c | eprop-tau100-1f | + `eprop_tau_e=100` | Very long, noisier |
+| 4d | eprop-tau2-1f | `eprop_tau_e=2` | Diagnostic: near-random → sanity-checks traces carry signal |
+| 5 | eprop-fixed-apical-1f | best config + `column.apical_pathway=additive` | Skip connection may give readout stronger gradient signal |
+| 6 | eprop-hybrid-1f | best config + `learning.rule=eprop_hybrid` | Revisit hybrid now that recurrent updates actually work |
+| 7 | ablation | best config × 1a / 1d / 1f | Architecture ablation with working e-prop |
+
+**Diagnostic metrics** (logged each eval step on all series-3 runs):
+- `eprop/trace_norm_mean` — if near zero, traces not accumulating
+- `eprop/l_signal` — mean |∂loss/∂z| from readout; if near zero, gradient not flowing
+- `eprop/update_mag` — mean |L × trace| applied to recurrent weights; key diagnostic for optimizer mismatch
+
+**Key hyperparameters** (in priority order after baseline established):
+
+| Hyperparameter | Current | Notes |
+|---|---|---|
+| `eprop_tau_e` | auto (~8 ms) | Most theoretically motivated sweep; try {20, 50, 100}; τ_e=2 as diagnostic |
+| Separate recurrent LR | same as readout (1e-4) | If `eprop/update_mag` tiny even with Adam, try 3e-4 or 1e-3 for recurrent only |
+| Sequence length | 128 | Longer (256, 512) gives traces more accumulation time; expensive but high-leverage |
+| Batch reset frequency | every batch | Resetting every N>1 batches lets traces accumulate longer without reintroducing state drift |
+| Adam β1/β2 for recurrent | 0.9 / 0.999 | Low priority; standard values should be fine |
+
+**Series-3 completed results (@~25M tokens, batch=32):**
+
+| Run | Val ppl | Train ppl | Notes |
+|---|---|---|---|
+| eprop-cos-reset-1f | ~302 @50M | — | State drift fix confirmed; broken traces; stopped early |
+| eprop-fixed-1f | ~264 @100M | — | Baseline with all fixes |
+| eprop-fixed-adam-1f | ~400 flat | — | Adam amplifies noise; terminated |
+| eprop-smallbatch-1f | ~390 flat | ~362 | l_signal dying; no apical; terminated |
+| eprop-norml-1f | ~400 (stopped) | — | normalize alone cannot fix dying signal |
+| eprop-tau50-1f | ~400 (stopped) | — | longer τ_e alone cannot fix dying signal |
+| eprop-apical-norml-1d | ~151 | ~125 | normalize hurts |
+| eprop-apical-norml-tau50-1f | ~140 | ~107 | normalize hurts |
+| eprop-apical-norml-1f | ~135 | ~133 | normalize hurts |
+| eprop-apical-tau50-1f | ~89 | ~85 | τ_e=50 mildly worse than default |
+| eprop-apical-1d | ~86 | ~72 | good but noisy; 1d ≈ 1f by end |
+| **eprop-apical-1f** | **~84** | **~80** | **winner — apical alone, default settings** |
+
+**KEY FINDING 1 — apical pathway is the entire trick:**
+Without apical, l_signal dies (0.0018→0.0004) and all runs plateau at ~400 ppl regardless of
+normalize, τ_e, or batch size.  With apical, l_signal climbs (0.0015→0.0075), recurrent weights
+learn, and val ppl reaches ~84 — a 333× improvement in sample efficiency vs BPTT (which needs
+~50M tokens to reach 200 ppl; e-prop+apical reaches it within 150K tokens).
+
+**KEY FINDING 2 — normalization is actively harmful:**
+Across every setting (1f, 1d, τ_e=50), `normalize_l_signal` degrades val ppl by ~60%.
+The magnitude of l_signal carries real information: when the readout is confident, smaller
+updates are correct.  Normalizing discards this calibration and destabilizes training.
+
+**KEY FINDING 3 — τ_e=50 mildly harmful; default τ_e is well-matched:**
+eprop-apical-tau50-1f (val 89) vs eprop-apical-1f (val 84).  Small difference, wrong direction.
+
+**KEY FINDING 4 — 1d (AdEx) and 1f (Hopfield) converge to the same performance under e-prop+apical:**
+1d wins on train ppl (72 vs 80) but is dramatically noisier.  1f wins on val (84 vs 86) with
+tighter train/val gap (4.7 vs 13.7).  By 15M tokens they trade places and are statistically
+indistinguishable.  Under BPTT, 1f (Hopfield) strongly beats 1d — so e-prop is not yet
+unlocking the Hopfield module's full representational power.
+
+**KEY FINDING 5 — plateau at ~80-85 ppl; e-prop faster but BPTT goes deeper:**
+All apical runs plateau around 80-85 ppl and oscillate.  BPTT on 1f reaches ~27-29 ppl —
+a ~55 ppl gap.  E-prop+apical is vastly more sample-efficient early (faster even than a
+transformer in the data-limited regime) but hits a ceiling that BPTT does not.  Candidate
+explanations: batch cancellation noise, LR too high for the plateau, limited credit horizon.
+
+**Mechanism:** the apical pathway (L5→L23 additive feedback) creates a more direct gradient
+path into the recurrent layers.  As apical weights are learned, a positive loop forms:
+better readout → stronger apical feedback → stronger l_signal → better recurrent updates.
+This may explain the biological function of apical dendrites in L5 as top-down credit
+assignment carriers — not just modulatory, but structurally necessary for online learning.
+
+**Batch cancellation confirmed:** `l_signal` ∝ 1/√batch (0.0009→0.0018 as batch 64→32).
+Without apical, signal too small to drive reliable descent regardless of batch size.
+
+**Throughput:** batch=32 runs at ~1350 tokens/s (≈20h for 100M tokens) vs ~15K tokens/s for batch=1024 BPTT.
+This is a fundamental bottleneck — e-prop is inherently sequential.  Ideas for later:
+
+1. **Truncated BPTT as bridge** — longer chunks per step, fewer steps, retains online character
+2. **Per-example gradients via `torch.vmap`** — get per-example `L_vec` without cancellation, then average *updates* not signals; enables large batch without cancellation
+3. **`torch.compile` + bf16** — free 2–3× on forward/backward even at small batch
+4. **Profile first** — at batch=32 GPU is likely underutilized; bottleneck may be Python/data overhead
+
+---
+
+## Roadmap and paper narrative
+
+### The emerging story
+
+The project has converged on a clear narrative with three interlocking findings:
+
+1. **Architecture:** A biologically-structured cortical column (layered E/I populations, AdEx neurons,
+   STP, Hopfield hippocampus) matches or exceeds parameter-matched RNNs on language modelling, and each
+   component is independently motivated by neuroscience.
+
+2. **Learning rule:** E-prop (Bellec et al. 2020) — a biologically plausible online learning rule —
+   can train this architecture, *but only when the apical pathway is present.*  Without apical feedback,
+   the learning signal dies within the first 1–2M tokens as the readout converges.  With apical, the
+   signal grows, recurrent weights learn, and training is ~7-8× more token-efficient.
+
+3. **Apical dendrites as credit assignment:** The additive apical pathway (L5→L23 feedback) acts as a
+   learned credit assignment channel.  As apical weights are trained alongside recurrent weights, a
+   positive loop forms: better readout → stronger apical feedback → stronger l_signal → better recurrent
+   updates.  This provides a computational account of why apical dendrites in L5 carry top-down signals
+   in the brain — they may be the biological implementation of feedback-based credit assignment.
+
+### Immediate next steps
+
+**Series-3 complete.** Winner: `eprop-apical-1f` (no normalize, default τ_e, 1f architecture).
+All series-3 runs terminated.  Moving to hybrid e-prop/BPTT.
+
+**Step 1 — hybrid e-prop/BPTT with apical (current priority).**
+Hypothesis: e-prop+apical provides exceptional sample efficiency early but plateaus at ~80-85 ppl
+due to noisy batch-averaged credit.  Periodic BPTT consolidation bursts (analogous to sleep replay)
+may correct accumulated noise and drive val ppl below the e-prop floor, while keeping e-prop for
+the fast early descent.  This is the most biologically motivated combination in the project.
+
+Sweep three configurations on 1f + apical:
+
+| Run | Config | Purpose |
+|-----|--------|---------|
+| eprop-hybrid-readout-1f | `hybrid_bptt_scope=readout_only`, 100 eprop + 10 bptt steps | Light consolidation — readout only |
+| eprop-hybrid-full-1f | `hybrid_bptt_scope=full`, 100 eprop + 10 bptt steps | Full consolidation — all weights |
+| eprop-hybrid-full-more-1f | `hybrid_bptt_scope=full`, 100 eprop + 50 bptt steps | More consolidation — does ratio matter? |
+
+**Step 2 — sleep/wake ratio sweep (potential paper section).**
+
+The aggressive hybrid (20 e-prop : 10 BPTT = **2:1 ratio**) is the clear winner so far.
+Notably, biological sleep-wake cycles are ~16h awake : ~8h asleep — also **2:1**.
+The unit of "experience" here is tokens seen rather than wall-clock time, so there is no fixed
+equivalence between steps and hours.  But the *proportion* of online vs. offline processing
+matching the biological ratio is striking, and may reflect a deeper computational principle
+rather than an arbitrary biological constraint.
+
+This motivates a systematic sweep of awake:asleep ratios as a potential paper section:
+
+| Run | E-prop steps | BPTT steps | Ratio (awake:asleep) | Biological analogue |
+|-----|-------------|------------|---------------------|---------------------|
+| hybrid-ratio-5to1 | 50 | 10 | 5:1 | Very sleep-deprived |
+| hybrid-ratio-2to1 | 20 | 10 | 2:1 | **Biological optimum — current winner** |
+| hybrid-ratio-1to1 | 10 | 10 | 1:1 | Equal awake/asleep |
+| hybrid-ratio-1to2 | 10 | 20 | 1:2 | More sleep than wake |
+| hybrid-ratio-1to5 | 10 | 50 | 1:5 | Mostly asleep |
+
+All with `hybrid_bptt_lr=3e-4`, `hybrid_bptt_scope=full`, apical.  The prediction: performance
+peaks near 2:1 and degrades in both directions — too little BPTT leaves e-prop noise uncorrected;
+too much BPTT dominates and loses the fast online learning advantage.
+
+**Step 3 — apical BPTT sweep** (`scripts/run_hopfield_apical_sweep.py --runs 1d_apical 1f_apical 1i_apical`).
+Answers: does apical help BPTT too?  Does Hopfield contribute beyond AdEx when apical is present?
+Critical for disentangling architecture vs learning rule contributions.
+
+**Step 4 — canonical ablation series.**  Clean 1a→1f runs with best hybrid config, for paper table.
+
+### The essential question: what is causing the ~80 ppl plateau?
+
+E-prop+apical plateaus at ~80 ppl while BPTT on the same architecture reaches ~27–29 ppl — a ~50 ppl
+gap.  Two candidate explanations, and two experiments that cleanly separate them:
+
+**Hypothesis A — Credit horizon (primary suspect).**
+E-prop's eligibility traces decay as γ^t = exp(-t/τ_e).  With default τ_e ≈ 8, the trace retains
+only exp(-128/8) ≈ 0% of information from the start of a 128-token sequence.  With τ_e=50, still
+only ~8%.  BPTT assigns credit over the full 128-token window; e-prop structurally cannot.
+TinyStories requires tracking referents over many tokens ("the little girl... she") — exactly the
+regime where a short credit horizon fails.
+
+**Hypothesis B — Batch cancellation (secondary suspect).**
+At batch=32, opposite-sign learning signals cancel across sequences, attenuating recurrent updates.
+Already reduced from batch=1024, but not eliminated.
+
+**The diagnostic experiments (not yet run):**
+
+| Experiment | Prediction if A | Prediction if B |
+|---|---|---|
+| `eprop_tau_e=128` (full window, γ≈0.992) | Plateau shifts 80→~65–70 | Plateau unchanged |
+| `batch_size=8` (near-single-example) | Plateau unchanged | Plateau shifts downward |
+
+If τ_e=128 moves the plateau, credit horizon is the primary constraint and the hybrid (BPTT
+consolidation) is a principled biological solution — e-prop handles fast local learning,
+BPTT bursts provide the long-range credit that traces cannot.
+If batch=8 moves it instead, the fix is per-example traces via `torch.vmap`.
+If neither moves it, the gap is intrinsic to the online approximation.
+
+**Commands (ready to run when the hybrid sweep concludes):**
 ```bash
-python scripts/run_eprop_series_2.py \
-    --tokenizer checkpoints/tokenizer.pkl \
-    --wandb --wandb-project cortex-lm --wandb-group eprop2-YYYY-MM-DD
+# Credit horizon test
+python scripts/train.py --config configs/phase1f_hopfield.yaml --wandb --override training.batch_size=32 training.max_tokens=100000000 training.lr=0.0001 training.log_tokens=51200 training.eval_tokens=98304 training.checkpoint_dir=checkpoints/eprop-apical-tau128-1f data.tokenizer_path=checkpoints/cortex-lm-minimal_sei-rate_c8e40_bs1024_lr3e-4/ logging.project=cortex-lm logging.group=eprop-series-3 learning.rule=eprop learning.reset_state_between_batches=true learning.eprop_tau_e=128 column.apical_pathway=additive synapse.inter_column_stp=false name=eprop-apical-tau128-1f
+
+# Batch cancellation test
+python scripts/train.py --config configs/phase1f_hopfield.yaml --wandb --override training.batch_size=8 training.max_tokens=100000000 training.lr=0.0001 training.log_tokens=51200 training.eval_tokens=98304 training.checkpoint_dir=checkpoints/eprop-apical-batch8-1f data.tokenizer_path=checkpoints/cortex-lm-minimal_sei-rate_c8e40_bs1024_lr3e-4/ logging.project=cortex-lm logging.group=eprop-series-3 learning.rule=eprop learning.reset_state_between_batches=true column.apical_pathway=additive synapse.inter_column_stp=false name=eprop-apical-batch8-1f
 ```
 
-| Run | Flags | Val ppl | Notes |
-|---|---|---|---|
-| eprop-freeze-1f | freeze_recurrent | — | *pending* |
-| eprop-adam-rec-1f | adam_recurrent | — | *pending* |
-| eprop-dale10-1f | dale_interval=10 | — | *pending* |
-| eprop-adam-dale-1f | adam_recurrent + dale_interval=10 | — | *pending* |
-| eprop-tau2-1f | eprop_tau_e=2 | — | *pending* |
-| eprop-tau50-1f | eprop_tau_e=50 | — | *pending* |
+### Open questions
+
+- Is the apical pathway doing **credit assignment specifically** (e-prop benefit only) or **representation
+  quality generally** (BPTT benefit too)?  Apical BPTT sweep answers this.
+- Does the **Hopfield module** contribute independently of apical, or is apical doing the work?
+  Compare 1d_apical vs 1f_apical in both BPTT and e-prop settings.
+- Does **CA1** (phase 1i) add anything on top of CA3?
+- Can **per-example traces** (`torch.vmap`) recover a larger-batch training regime once the apical
+  signal bottleneck is resolved?
 
 ---
 

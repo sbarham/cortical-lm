@@ -73,6 +73,14 @@ SEQ_LEN = 128
 
 EXPERIMENTS = [
     {
+        "id":       "freeze_readout_1f",
+        "label":    "freeze readout+embed — diagnostic (only recurrent weights trained via e-prop)",
+        "config":   "configs/phase1f_hopfield.yaml",
+        "extra":    ["learning.rule=eprop", "learning.freeze_readout=true",
+                     "synapse.inter_column_stp=false", "name=eprop-freeze-readout-1f"],
+        "ckpt_dir": "checkpoints/eprop-freeze-readout-1f",
+    },
+    {
         "id":       "freeze_1f",
         "label":    "freeze recurrent — diagnostic (only readout+embed trained)",
         "config":   "configs/phase1f_hopfield.yaml",
