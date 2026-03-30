@@ -1,0 +1,97 @@
+# Phase 1j: Hopfield CA3 with Xi row normalisation (v2 baseline).
+# Single variable change vs phase1f_hopfield: normalize_xi on.
+#
+# Motivation: Xi (131K params) is updated at the same LR as all other weights,
+# but softmax attention concentrates on a few memories as training progresses,
+# giving those memories enormous gradient and near-zero to others.  Unit-norm
+# Xi rows bound attention score magnitudes and stabilise the energy landscape.
+#
+# This is the direct comparison for 1f: identical architecture, only Xi
+# normalisation added.  If 1j >> 1f, instability was the problem.
+# No CA1 -- that is tested in 1k.
+# No apical pathway -- kept for the apical ablation series.
+
+name: cortex-lm-phase1j-hopfield-v2
+version: "0.1"
+
+data:
+  dataset: tinystories
+  tokenizer: bpe
+  vocab_size: 4096
+  seq_len: 128
+
+neuron:
+  model: rate_adex
+  nonlinearity: tanh
+  tau_m_dist: lognormal
+  tau_m_range: [2, 30]
+  tau_w_dist: lognormal
+  tau_w_range: [30, 500]
+  adaptation_a: 0.1
+  learn_taus: false
+
+synapse:
+  inter_column_stp: true
+  tau_f_range: [50, 300]
+  tau_d_range: [100, 800]
+  U0_e: 0.2
+  U0_i: 0.5
+
+column:
+  model: layered
+  n_columns: 8
+  disinhibition: false
+  layer_sizes:
+    l4:  {n_e: 16, n_i: 4}
+    l23: {n_e: 32, n_i: 8}
+    l5:  {n_e: 16, n_i: 4}
+    l6:  {n_e: 12, n_i: 3}
+
+connectivity:
+  type: gaussian_1d
+  p_max: 0.7
+  sigma: 2.0
+
+hippocampus:
+  model: modern_hopfield
+  n_memories: 64
+  d_model: 64
+  beta: 1.0
+  ca1: false
+  normalize_xi: true              # Xi rows normalized to unit sphere after each step
+
+readout:
+  source: l5
+  n_layers: 1
+  hidden_dim: 128
+
+embedding:
+  dim: 32
+
+learning:
+  rule: bptt
+  truncated_bptt_k: 32
+  reset_state_between_batches: false
+
+training:
+  batch_size: 512
+  max_tokens: 1_000_000_000
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  optimizer: adamw
+  scheduler: cosine
+  warmup_steps: 100
+  eval_tokens: 1_638_400
+  checkpoint_tokens: 32_768_000
+  seed: 42
+
+simulation:
+  dt: 1.0
+
+logging:
+  wandb: false
+  log_tokens: 1_638_400
+  log_weight_stats: true
+  log_tau_stats: true
+  log_spike_rates: true

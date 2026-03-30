@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 scripts/run_canonical_apical.py --dry-run --runs 1j 1k 1l)"
+    ]
+  }
+}

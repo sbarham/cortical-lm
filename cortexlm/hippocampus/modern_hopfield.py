@@ -38,20 +38,33 @@ class ModernHopfieldHippocampus(HippocampalModule):
 
     Parameters
     ----------
-    n_memories     : number of stored memory patterns
-    d_model        : dimensionality of the memory space
-    beta           : inverse temperature for retrieval softmax
-    ca1            : enable CA1 prediction-error gating (default False)
+    n_memories       : number of stored memory patterns
+    d_model          : dimensionality of the memory space
+    beta             : inverse temperature for retrieval softmax
+    ca1              : enable CA1 prediction-error gating (default False)
+    normalize_xi     : normalize Xi rows to unit sphere after each optimizer step
+                       (default False).  Stabilises attention score magnitudes and
+                       prevents retrieval collapse.  Call normalize_xi_rows() from
+                       the trainer after optimizer.step().
+    gated_error_vec  : use gated_retrieved (not retrieved) to compute error_vec,
+                       so the write gate also suppresses Xi gradients through the
+                       CA1 feedback path (default False — legacy behaviour).
+    forward_gate_ca1 : multiply ca1_mod by write_gate in the forward pass so
+                       high-surprise states produce stronger CA1 error feedback
+                       (default False — gradient-only gating).
     """
 
     def __init__(self, config: dict, n_columns: int, n_l5e: int):
         super().__init__(config, n_columns, n_l5e)
 
         hcfg = config["hippocampus"]
-        self.n_memories = hcfg.get("n_memories", 512)
-        self.d_model    = hcfg.get("d_model", 256)
-        self.beta       = hcfg.get("beta", 1.0)
-        self.ca1        = hcfg.get("ca1", False)
+        self.n_memories       = hcfg.get("n_memories", 512)
+        self.d_model          = hcfg.get("d_model", 256)
+        self.beta             = hcfg.get("beta", 1.0)
+        self.ca1              = hcfg.get("ca1", False)
+        self.normalize_xi     = hcfg.get("normalize_xi", False)
+        self.gated_error_vec  = hcfg.get("gated_error_vec", False)
+        self.forward_gate_ca1 = hcfg.get("forward_gate_ca1", False)
 
         cortical_dim = n_columns * n_l5e  # concatenated L5 across all columns
 
@@ -106,11 +119,10 @@ class ModernHopfieldHippocampus(HippocampalModule):
             # EC layer-III observation stream: project current cortical state to d_model
             ec_obs = self.ca1_proj(cortical_state_l5)             # [batch, d_model]
 
-            # Directional prediction error
-            error_vec = retrieved - ec_obs                         # [batch, d_model]
-
-            # Surprise magnitude — normalised so the gate is scale-invariant
-            surprise_norm = torch.norm(error_vec, dim=-1, keepdim=True)  # [batch, 1]
+            # ── Surprise magnitude (computed from ungated error for scale) ────
+            # Use ungated retrieved here so surprise reflects true prediction error.
+            raw_error     = retrieved - ec_obs                     # [batch, d_model]
+            surprise_norm = torch.norm(raw_error, dim=-1, keepdim=True)  # [batch, 1]
             surprise = surprise_norm                               # stored for logging
 
             # ── Function 1: gate Xi writes ────────────────────────────────────
@@ -133,9 +145,19 @@ class ModernHopfieldHippocampus(HippocampalModule):
             modulation = mod_flat.view(batch, self.n_columns, self.modulation_dim)
 
             # ── Function 2: error feedback to cortex (CA1 -> EC layer V) ─────
-            # The directional error tells the cortex how reality departs from memory.
+            # gated_error_vec=True (1k/1l): use gated_retrieved so the write gate
+            #   also suppresses Xi gradients through this path (fixes gradient leak).
+            # gated_error_vec=False (legacy 1i): use raw retrieved, leaking gradients.
+            error_vec  = (gated_retrieved if self.gated_error_vec else retrieved) - ec_obs
             ca1_flat   = self.ca1_out_proj(error_vec)              # [batch, n_cols*mod_dim]
             ca1_mod    = ca1_flat.view(batch, self.n_columns, self.modulation_dim)
+
+            # forward_gate_ca1=True (1l): scale ca1_mod by write_gate so surprised
+            #   states produce stronger cortical error feedback.
+            # forward_gate_ca1=False (1k and legacy): gradient-only gating.
+            if self.forward_gate_ca1:
+                ca1_mod = write_gate.unsqueeze(1) * ca1_mod
+
             modulation = modulation + ca1_mod
 
         else:
@@ -144,6 +166,17 @@ class ModernHopfieldHippocampus(HippocampalModule):
             modulation = mod_flat.view(batch, self.n_columns, self.modulation_dim)
 
         return modulation, surprise
+
+    def normalize_xi_rows(self) -> None:
+        """Normalize Xi rows to unit sphere (call from trainer after optimizer.step()).
+
+        Stabilises Hopfield attention score magnitudes and prevents retrieval
+        collapse when softmax concentrates on a small number of memories.
+        Only active when hippocampus.normalize_xi: true in config.
+        """
+        if self.normalize_xi:
+            with torch.no_grad():
+                self.Xi.data = F.normalize(self.Xi.data, dim=-1)
 
     def init_state(self, batch_size: int) -> Dict[str, torch.Tensor]:
         return {}

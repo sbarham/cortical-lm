@@ -43,9 +43,18 @@ Three configs on 1f + apical:
 Hypothesis: periodic BPTT bursts correct accumulated noise and push val below the ~80 ppl e-prop floor,
 while e-prop handles the fast early descent. Biological analogy: sleep replay consolidation.
 
-**After hybrid:**
-- Apical BPTT sweep (run_hopfield_apical_sweep.py): does apical help BPTT? Does Hopfield contribute beyond AdEx with apical?
-- Canonical ablation series 1a→1f with best hybrid config
+**After hybrid — NEXT PRIORITY BEFORE RETURNING TO EPROP:**
+The existing canonical BPTT series (1a–1f) was run WITHOUT apical. This is technical debt.
+Apical turns out to be load-bearing for architectural components (especially Hopfield CA3, possibly CA1).
+The ablation results are potentially misleading until rerun with apical.
+
+Definitive BPTT ablation plan (do this next, in order):
+1. Apical BPTT sweep — run_hopfield_apical_sweep.py --runs 1d_apical 1f_apical 1i_apical
+2. Full canonical series 1a→1f WITH apical (column.apical_pathway=additive)
+3. Full canonical series 1a→1f WITH apical + SGDR (training.scheduler=sgdr)
+
+Only after these three do we have a trustworthy architecture story for the paper.
+Then return to e-prop: sleep/wake ratio sweep, credit horizon diagnostics (tau128, batch8).
 
 **E-prop throughput — ideas for later:**
 1. Truncated BPTT as bridge (longer chunks, fewer steps)

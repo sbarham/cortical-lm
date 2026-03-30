@@ -119,6 +119,12 @@ class BPTTTrainer:
             if hasattr(module, "enforce_dale"):
                 module.enforce_dale()
 
+    def _normalize_xi(self):
+        """Normalize Hopfield Xi rows to unit sphere if configured."""
+        hpc = self.model.hippocampus
+        if hasattr(hpc, "normalize_xi_rows"):
+            hpc.normalize_xi_rows()
+
     def _collect_grad_norms(self) -> dict:
         """
         Collect gradient norms for key parameters along the credit-assignment path.
@@ -199,6 +205,7 @@ class BPTTTrainer:
             nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
         self.optimizer.step()
         self._enforce_dale()
+        self._normalize_xi()
         return loss.item(), new_state.detach()
 
     def _truncated_bptt(self, x, y, state):
@@ -225,6 +232,7 @@ class BPTTTrainer:
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
             self.optimizer.step()
             self._enforce_dale()
+            self._normalize_xi()
 
             state = state.detach()
             total_loss += loss.item()

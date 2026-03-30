@@ -1188,6 +1188,41 @@ This is a fundamental bottleneck — e-prop is inherently sequential.  Ideas for
 3. **`torch.compile` + bf16** — free 2–3× on forward/backward even at small batch
 4. **Profile first** — at batch=32 GPU is likely underutilized; bottleneck may be Python/data overhead
 
+### e-prop series 4 — hybrid consolidation sweep (50 M tokens, 1f + apical)
+
+Six variants swept across two axes: consolidation frequency and whether BPTT is triggered
+on a fixed schedule or by adaptive plateau detection.
+
+| Run | E-prop steps | BPTT steps | LR | Trigger | Val ppl @50M |
+|-----|-------------|------------|-----|---------|--------------|
+| conservative | 500 | 10 | 1e-5 | fixed | ~55 |
+| moderate | 100 | 10 | 1e-4 | fixed | ~49 |
+| **aggressive** | **20** | **10** | **3e-4** | **fixed** | **41.3** |
+| adaptive-slow | — | 20 | 3e-4 | EMA plateau (~2M tok window) | ~52 |
+| adaptive-fast | — | 20 | 3e-4 | EMA plateau (~1M tok window) | ~48 |
+| adaptive-vfast | — | 20 | 3e-4 | EMA plateau (~250K tok window) | 46.86 |
+| **Transformer baseline** | — | — | — | — | **37.0** |
+| E-prop+apical (no consolidation) | — | — | — | — | ~84 (plateau) |
+
+**KEY FINDING 6 — hybrid consolidation breaks the 80 ppl ceiling and approaches transformer performance:**
+The aggressive hybrid (20 e-prop : 10 BPTT = **2:1 ratio**) achieves **41.3 val ppl at 50M tokens** —
+only 4 ppl behind a parameter-matched transformer (37 ppl).  Pure e-prop+apical plateaus at ~84 ppl;
+the hybrid closes ~40% of the remaining gap to the transformer.
+
+**KEY FINDING 7 — the optimal awake:asleep ratio is 2:1, matching biology:**
+Performance peaks at 2:1 (aggressive) and degrades symmetrically toward more-sleep and less-sleep
+extremes.  Biological sleep-wake cycles are ~16h awake : ~8h asleep — also 2:1.  Tokens seen are not
+hours, but the proportion of online vs. offline processing matching the biological ratio is striking.
+
+**KEY FINDING 8 — adaptive consolidation is less reliable than fixed at this scale:**
+Adaptive plateau detection (EMA-based) consistently underperforms the fixed aggressive schedule.
+The adaptive variants fire too cautiously early and too frequently late, introducing irregular LR
+perturbations.  Fixed-schedule consolidation with short cycles wins.
+
+**Status:** transformer's learning curve slope was steeper than the hybrid's at 50M tokens.
+The transformer would likely pull further ahead given more compute.  Whether the hybrid can
+match the transformer at 1B tokens is an open question.
+
 ---
 
 ## Roadmap and paper narrative
@@ -1213,32 +1248,44 @@ The project has converged on a clear narrative with three interlocking findings:
 
 ### Immediate next steps
 
-**Series-3 complete.** Winner: `eprop-apical-1f` (no normalize, default τ_e, 1f architecture).
-All series-3 runs terminated.  Moving to hybrid e-prop/BPTT.
+**Series-3 complete.** Winner: `eprop-apical-1f`.
+**Series-4 complete.** Winner: aggressive hybrid (20:10 e-prop:BPTT, 3e-4 BPTT LR) — **41.3 val ppl at 50M tokens** vs transformer **37.0 ppl**.  All current e-prop runs terminated.
 
-**Step 1 — hybrid e-prop/BPTT with apical (current priority).**
-Hypothesis: e-prop+apical provides exceptional sample efficiency early but plateaus at ~80-85 ppl
-due to noisy batch-averaged credit.  Periodic BPTT consolidation bursts (analogous to sleep replay)
-may correct accumulated noise and drive val ppl below the e-prop floor, while keeping e-prop for
-the fast early descent.  This is the most biologically motivated combination in the project.
+**⚠️ BEFORE returning to e-prop: rerun the canonical BPTT ablation series with apical.**
+The existing 1a–1f BPTT results were obtained without the apical pathway.  Apical turned out to be
+load-bearing for architectural components (Hopfield CA3, possibly CA1).  The ablation results are
+potentially misleading until rerun with apical.
 
-Sweep three configurations on 1f + apical:
+**Definitive BPTT ablation plan (in order):**
 
-| Run | Config | Purpose |
-|-----|--------|---------|
-| eprop-hybrid-readout-1f | `hybrid_bptt_scope=readout_only`, 100 eprop + 10 bptt steps | Light consolidation — readout only |
-| eprop-hybrid-full-1f | `hybrid_bptt_scope=full`, 100 eprop + 10 bptt steps | Full consolidation — all weights |
-| eprop-hybrid-full-more-1f | `hybrid_bptt_scope=full`, 100 eprop + 50 bptt steps | More consolidation — does ratio matter? |
+1. **Apical BPTT sweep** (`run_hopfield_apical_sweep.py --runs 1d_apical 1f_apical 1i_apical`)
+   — Critical: 1i (CA1 + apical) is first priority.
+2. **Full canonical series with apical** (`run_canonical_apical.py --runs 1a 1b 1c 1d 1e 1f 1g 1h 1i`)
+3. **Full canonical series with apical + SGDR** (same script, `--override training.scheduler=sgdr`)
 
-**Step 2 — sleep/wake ratio sweep (potential paper section).**
+Run the 1i ablation immediately:
 
-The aggressive hybrid (20 e-prop : 10 BPTT = **2:1 ratio**) is the clear winner so far.
+```bash
+python scripts/run_hopfield_apical_sweep.py \
+    --tokenizer checkpoints/tokenizer.pkl \
+    --wandb --wandb-project cortex-lm \
+    --runs 1i_apical
+
+# Then full series:
+python scripts/run_canonical_apical.py \
+    --tokenizer checkpoints/tokenizer.pkl \
+    --wandb --wandb-project cortex-lm \
+    --runs 1i 1f 1d 1a 1b 1c 1e 1g 1h   # out-of-order OK; 1i first
+```
+
+Only after these three BPTT series are complete do we have a trustworthy architecture story for the paper.
+
+**After BPTT ablations — return to e-prop:**
+
+**Step 1 — sleep/wake ratio sweep (potential paper section).**
+
+The aggressive hybrid (20 e-prop : 10 BPTT = **2:1 ratio**) is the clear winner.
 Notably, biological sleep-wake cycles are ~16h awake : ~8h asleep — also **2:1**.
-The unit of "experience" here is tokens seen rather than wall-clock time, so there is no fixed
-equivalence between steps and hours.  But the *proportion* of online vs. offline processing
-matching the biological ratio is striking, and may reflect a deeper computational principle
-rather than an arbitrary biological constraint.
-
 This motivates a systematic sweep of awake:asleep ratios as a potential paper section:
 
 | Run | E-prop steps | BPTT steps | Ratio (awake:asleep) | Biological analogue |
@@ -1257,7 +1304,33 @@ too much BPTT dominates and loses the fast online learning advantage.
 Answers: does apical help BPTT too?  Does Hopfield contribute beyond AdEx when apical is present?
 Critical for disentangling architecture vs learning rule contributions.
 
-**Step 4 — canonical ablation series.**  Clean 1a→1f runs with best hybrid config, for paper table.
+**⚠️ NOTE: The existing canonical BPTT series (1a–1f) must be rerun before returning to e-prop.**
+This is the next priority after the current hybrid runs finish and the apical BPTT sweep completes.
+
+The existing 1a→1f ablation series was run **without the apical pathway**, which means every result
+in that table potentially understates the contribution of components that depend on top-down feedback
+to function.  Hopfield CA3 is the clearest case — it barely beat AdEx in the no-apical condition,
+which looked like a weak result.  But if apical is what allows CA3 to use its memory bank for credit
+assignment, the comparison was never fair.  The same may apply to CA1.
+
+**The definitive ablation plan (BPTT, before returning to e-prop):**
+
+1. **Apical BPTT sweep** — `run_hopfield_apical_sweep.py --runs 1d_apical 1f_apical 1i_apical`
+   Establishes the apical baseline for each architecture variant.
+
+2. **Full canonical series with apical** — redo 1a→1f with `column.apical_pathway=additive`
+   Gets the true marginal contribution of each component under fair conditions.
+
+3. **Full canonical series with apical + SGDR** — same as above but with `training.scheduler=sgdr`
+   SGDR (cosine annealing with warm restarts) may be doing real work, particularly for deeper
+   architectures.  Warm restarts allow the model to escape local basins on a schedule — the Hopfield
+   memory bank may consolidate during descent and diversify during restarts, allowing richer attractor
+   structures to form.  This was helping in earlier runs and deserves a clean test.
+
+Only after these three series are complete do we have a trustworthy architecture story for the paper.
+
+**Step 4 — return to e-prop.**  Resume hybrid sweep, sleep/wake ratio experiments, and credit horizon
+diagnostics with confidence that the underlying architecture is well-characterised.
 
 ### The essential question: what is causing the ~80 ppl plateau?
 

@@ -1,0 +1,102 @@
+# Phase 1k: Hopfield CA3 + CA1 with two fixes applied (v2 CA1).
+# Single variable change vs phase1j_hopfield_v2: ca1 on + gradient-leak fix.
+#
+# Fixes vs original CA1 (1i):
+#   1. gated_error_vec: true -- error_vec now uses gated_retrieved, so the
+#      write gate suppresses Xi gradients through *both* the CA3 output path
+#      and the CA1 error-feedback path.  In 1i, the CA1 path bypassed the gate
+#      entirely (bug: write_gate affected only out_proj, not ca1_out_proj).
+#   2. normalize_xi: true -- Xi row normalisation for training stability.
+#
+# The write gate remains gradient-only (forward_gate_ca1: false): the cortex
+# always receives the full error signal; only Xi update dynamics are gated.
+# Forward-gated CA1 modulation is tested separately in 1l.
+#
+# No apical pathway -- kept for the apical ablation series.
+
+name: cortex-lm-phase1k-hopfield-ca1-v2
+version: "0.1"
+
+data:
+  dataset: tinystories
+  tokenizer: bpe
+  vocab_size: 4096
+  seq_len: 128
+
+neuron:
+  model: rate_adex
+  nonlinearity: tanh
+  tau_m_dist: lognormal
+  tau_m_range: [2, 30]
+  tau_w_dist: lognormal
+  tau_w_range: [30, 500]
+  adaptation_a: 0.1
+  learn_taus: false
+
+synapse:
+  inter_column_stp: true
+  tau_f_range: [50, 300]
+  tau_d_range: [100, 800]
+  U0_e: 0.2
+  U0_i: 0.5
+
+column:
+  model: layered
+  n_columns: 8
+  disinhibition: false
+  layer_sizes:
+    l4:  {n_e: 16, n_i: 4}
+    l23: {n_e: 32, n_i: 8}
+    l5:  {n_e: 16, n_i: 4}
+    l6:  {n_e: 12, n_i: 3}
+
+connectivity:
+  type: gaussian_1d
+  p_max: 0.7
+  sigma: 2.0
+
+hippocampus:
+  model: modern_hopfield
+  n_memories: 64
+  d_model: 64
+  beta: 1.0
+  ca1: true                       # CA1 prediction-error write-gating ON
+  normalize_xi: true              # Xi rows normalized to unit sphere after each step
+  gated_error_vec: true           # error_vec uses gated_retrieved (fixes gradient leak)
+  forward_gate_ca1: false         # gradient-only gating (forward signal ungated)
+
+readout:
+  source: l5
+  n_layers: 1
+  hidden_dim: 128
+
+embedding:
+  dim: 32
+
+learning:
+  rule: bptt
+  truncated_bptt_k: 32
+  reset_state_between_batches: false
+
+training:
+  batch_size: 512
+  max_tokens: 1_000_000_000
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  optimizer: adamw
+  scheduler: cosine
+  warmup_steps: 100
+  eval_tokens: 1_638_400
+  checkpoint_tokens: 32_768_000
+  seed: 42
+
+simulation:
+  dt: 1.0
+
+logging:
+  wandb: false
+  log_tokens: 1_638_400
+  log_weight_stats: true
+  log_tau_stats: true
+  log_spike_rates: true
