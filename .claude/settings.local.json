@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3 scripts/run_canonical_apical.py --dry-run --runs 1j 1k 1l)"
+      "Bash(python3 scripts/run_canonical_apical.py --dry-run --runs 1j 1k 1l)",
+      "Bash(python3 scripts/run_eprop_sweep.py --dry-run --runs 1i 1j 1k 1l)"
     ]
   }
 }

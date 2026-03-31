@@ -116,6 +116,8 @@ def main():
                         help="Ignore existing token cache and re-tokenize from scratch")
     parser.add_argument("--wandb", action="store_true",
                         help="Enable Weights & Biases logging (overrides config)")
+    parser.add_argument("--device", default=None,
+                        help="Device override: cuda, mps, cpu (default: auto-detect)")
     args = parser.parse_args()
 
     # Parse overrides — dotted keys like "training.batch_size=128" become nested dicts
@@ -163,13 +165,22 @@ def main():
     seed = config["training"].get("seed", 42)
     torch.manual_seed(seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device:
+        device = torch.device(args.device)
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     print(f"Device: {device}")
     if device.type == "cuda":
         props = torch.cuda.get_device_properties(0)
         total_gb = props.total_memory / 1024**3
         print(f"  GPU:  {props.name}  VRAM={total_gb:.0f}GB")
         print(f"  Tip:  if vram stays below ~60% during training, increase batch_size")
+    elif device.type == "mps":
+        print(f"  Apple Silicon MPS backend")
     print()
 
     # ── Tokenizer ──────────────────────────────────────────────────────────
