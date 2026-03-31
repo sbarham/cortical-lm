@@ -32,12 +32,12 @@ Usage
 -----
 # Full sweep
 python scripts/run_hopfield_apical_sweep.py \\
-    --tokenizer checkpoints/tokenizer.pkl \\
+    --tokenizer tokenizers/tinystories_bpe4096.pkl \\
     --wandb --wandb-project cortex-lm
 
 # Cosine runs only first (then add SGDR if they look promising)
 python scripts/run_hopfield_apical_sweep.py \\
-    --tokenizer checkpoints/tokenizer.pkl \\
+    --tokenizer tokenizers/tinystories_bpe4096.pkl \\
     --wandb --wandb-project cortex-lm \\
     --runs 1d_apical 1f_apical 1i_apical
 
@@ -141,7 +141,7 @@ def run_experiment(exp: dict, cmd: list[str], dry_run: bool) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="Hopfield + apical pathway sweep")
-    parser.add_argument("--tokenizer", default=None)
+    parser.add_argument("--tokenizer", default="tokenizers/tinystories_bpe4096.pkl")
     parser.add_argument("--max-tokens", type=int, default=150_000_000,
                         help="Token budget per run (default: 150M). Use 1_000_000_000 for full canonical.")
     parser.add_argument("--batch-size", type=int, default=None,

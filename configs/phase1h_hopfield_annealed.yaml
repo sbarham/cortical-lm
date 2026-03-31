@@ -23,6 +23,7 @@ version: "0.1"
 data:
   dataset: tinystories
   tokenizer: bpe
+  tokenizer_path: tokenizers/tinystories_bpe4096.pkl
   vocab_size: 4096
   seq_len: 128
 

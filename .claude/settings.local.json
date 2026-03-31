@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(python3 scripts/run_canonical_apical.py --dry-run --runs 1j 1k 1l)",
-      "Bash(python3 scripts/run_eprop_sweep.py --dry-run --runs 1i 1j 1k 1l)"
+      "Bash(python3 scripts/run_eprop_sweep.py --dry-run --runs 1i 1j 1k 1l)",
+      "Bash(for f:*)",
+      "Bash(do)",
+      "Bash(sed -i 's/  tokenizer: bpe/  tokenizer: bpe\\\\n  tokenizer_path: tokenizers\\\\/tinystories_bpe4096.pkl/' \"$f\")",
+      "Bash(echo \"Updated $f\")",
+      "Bash(done)"
     ]
   }
 }

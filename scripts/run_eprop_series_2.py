@@ -50,12 +50,12 @@ Usage
 -----
 # Full series (6 experiments, ~6× 2 hours each)
 python scripts/run_eprop_series_2.py \\
-    --tokenizer checkpoints/tokenizer.pkl \\
+    --tokenizer tokenizers/tinystories_bpe4096.pkl \\
     --wandb --wandb-project cortex-lm --wandb-group eprop2-YYYY-MM-DD
 
 # Diagnostic first, then fixes if it confirms the recurrent updates are the cause
 python scripts/run_eprop_series_2.py \\
-    --tokenizer checkpoints/tokenizer.pkl \\
+    --tokenizer tokenizers/tinystories_bpe4096.pkl \\
     --wandb --wandb-project cortex-lm --wandb-group eprop2-YYYY-MM-DD \\
     --runs freeze_1f adam_rec_1f dale_1f adam_dale_1f
 
@@ -184,7 +184,7 @@ def run_experiment(exp: dict, cmd: list[str], dry_run: bool) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="e-prop diagnostic and fix series (series 2)")
-    parser.add_argument("--tokenizer", default=None)
+    parser.add_argument("--tokenizer", default="tokenizers/tinystories_bpe4096.pkl")
     parser.add_argument("--max-tokens", type=int, default=150_000_000)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=1e-4)

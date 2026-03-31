@@ -192,7 +192,7 @@ def main():
     parser.add_argument("--models", nargs="+",
                         default=["rnn", "lstm", "lstm_attention", "transformer"])
     parser.add_argument("--output", default="baseline_results.json")
-    parser.add_argument("--tokenizer", default=None,
+    parser.add_argument("--tokenizer", default="tokenizers/tinystories_bpe4096.pkl",
                         help="Path to a saved tokenizer.pkl (skips BPE retraining)")
     parser.add_argument("--wandb", action="store_true",
                         help="Enable Weights & Biases logging (overrides config)")

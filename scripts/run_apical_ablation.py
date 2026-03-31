@@ -46,7 +46,7 @@ VARIANT_IDS = [v for v, _ in VARIANTS]
 
 def parse_args():
     p = argparse.ArgumentParser(description="Run apical stream ablation series")
-    p.add_argument("--tokenizer", default=None,
+    p.add_argument("--tokenizer", default="tokenizers/tinystories_bpe4096.pkl",
                    help="Path to pre-trained tokenizer.pkl. Highly recommended to "
                         "reuse the same tokenizer as the canonical series for "
                         "comparable perplexities.")

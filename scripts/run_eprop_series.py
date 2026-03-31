@@ -27,13 +27,13 @@ Notes
 Usage
 -----
 # Default: 150M tokens, batch 1024, W&B disabled
-python scripts/run_eprop_series.py --tokenizer checkpoints/tokenizer.pkl
+python scripts/run_eprop_series.py --tokenizer tokenizers/tinystories_bpe4096.pkl
 
 # With W&B, custom group
-python scripts/run_eprop_series.py --tokenizer checkpoints/tokenizer.pkl --wandb --wandb-project cortex-lm --wandb-group eprop-2026-03-25
+python scripts/run_eprop_series.py --tokenizer tokenizers/tinystories_bpe4096.pkl --wandb --wandb-project cortex-lm --wandb-group eprop-2026-03-25
 
 # Specific experiments only
-python scripts/run_eprop_series.py --tokenizer checkpoints/tokenizer.pkl --runs bptt_1f eprop_1f
+python scripts/run_eprop_series.py --tokenizer tokenizers/tinystories_bpe4096.pkl --runs bptt_1f eprop_1f
 
 # Dry run
 python scripts/run_eprop_series.py --dry-run
@@ -158,7 +158,7 @@ def run_experiment(exp: dict, cmd: list[str], dry_run: bool) -> bool:
 def main():
     parser = argparse.ArgumentParser(description="e-prop learning rule ablation series")
 
-    parser.add_argument("--tokenizer", default=None,
+    parser.add_argument("--tokenizer", default="tokenizers/tinystories_bpe4096.pkl",
                         help="Path to pre-trained tokenizer (recommended)")
     parser.add_argument("--max-tokens", type=int, default=150_000_000,
                         help="Token budget per run (default: 150M = ~3x TinyStories)")

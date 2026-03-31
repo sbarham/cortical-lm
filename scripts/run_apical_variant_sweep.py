@@ -21,14 +21,14 @@ Usage
 # Sweep all five variants on the winning architecture
 python scripts/run_apical_variant_sweep.py \\
     --base-config configs/phase1f_hopfield.yaml \\
-    --tokenizer checkpoints/tokenizer.pkl \\
+    --tokenizer tokenizers/tinystories_bpe4096.pkl \\
     --wandb-project cortex-lm
 
 # Subset of variants
 python scripts/run_apical_variant_sweep.py \\
     --base-config configs/phase1f_hopfield.yaml \\
     --variants none additive multiplicative \\
-    --tokenizer checkpoints/tokenizer.pkl
+    --tokenizer tokenizers/tinystories_bpe4096.pkl
 
 # Dry run
 python scripts/run_apical_variant_sweep.py \\
@@ -76,7 +76,7 @@ def main():
     parser.add_argument("--base-config", required=True,
                         help="Base config for the winning architecture "
                              "(e.g. configs/phase1f_hopfield.yaml)")
-    parser.add_argument("--tokenizer", default=None,
+    parser.add_argument("--tokenizer", default="tokenizers/tinystories_bpe4096.pkl",
                         help="Pre-trained tokenizer.pkl")
     parser.add_argument("--variants", nargs="+", choices=VARIANTS, default=None,
                         help=f"Variants to run (default: all). Choices: {VARIANTS}")

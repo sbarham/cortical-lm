@@ -25,18 +25,18 @@ Usage
 -----
 # Full sweep (1a-1i, 1B tokens each)
 python scripts/run_canonical_apical.py \
-    --tokenizer checkpoints/tokenizer.pkl \
+    --tokenizer tokenizers/tinystories_bpe4096.pkl \
     --wandb --wandb-project cortex-lm
 
 # Run out of order -- 1i first
 python scripts/run_canonical_apical.py \
-    --tokenizer checkpoints/tokenizer.pkl \
+    --tokenizer tokenizers/tinystories_bpe4096.pkl \
     --wandb --wandb-project cortex-lm \
     --runs 1i 1f 1d 1a 1b 1c 1e 1g 1h
 
 # SGDR variant (warm restarts instead of cosine decay)
 python scripts/run_canonical_apical.py \
-    --tokenizer checkpoints/tokenizer.pkl \
+    --tokenizer tokenizers/tinystories_bpe4096.pkl \
     --wandb --wandb-project cortex-lm \
     --override training.scheduler=sgdr \
     --wandb-group canonical-apical-sgdr
@@ -195,7 +195,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Canonical ablation series 1a-1i with additive apical pathway"
     )
-    parser.add_argument("--tokenizer", default=None,
+    parser.add_argument("--tokenizer", default="tokenizers/tinystories_bpe4096.pkl",
                         help="Path to tokenizer.pkl (reuse from a prior run for comparable ppl).")
     parser.add_argument("--max-tokens", type=int, default=1_000_000_000,
                         help="Token budget per run (default: 1B for canonical).")

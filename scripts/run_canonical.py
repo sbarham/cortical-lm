@@ -20,19 +20,19 @@ reused for all subsequent phases so tokenisation is held constant.
 Usage
 -----
 # Full run from 1a → 1i
-python scripts/run_canonical.py --tokenizer checkpoints/tokenizer.pkl --wandb-project cortex-lm
+python scripts/run_canonical.py --tokenizer tokenizers/tinystories_bpe4096.pkl --wandb-project cortex-lm
 
 # Run only a range (e.g. rerun 1a–1d after correcting a bug)
-python scripts/run_canonical.py --tokenizer checkpoints/tokenizer.pkl --start-from 1a --end-at 1d
+python scripts/run_canonical.py --tokenizer tokenizers/tinystories_bpe4096.pkl --start-from 1a --end-at 1d
 
 # Resume mid-series
-python scripts/run_canonical.py --tokenizer checkpoints/tokenizer.pkl --start-from 1e
+python scripts/run_canonical.py --tokenizer tokenizers/tinystories_bpe4096.pkl --start-from 1e
 
 # Specific phases only
 python scripts/run_canonical.py --phases 1a 1d 1f
 
 # Override batch size to saturate an A10/H100
-python scripts/run_canonical.py --tokenizer checkpoints/tokenizer.pkl --batch-size 2048
+python scripts/run_canonical.py --tokenizer tokenizers/tinystories_bpe4096.pkl --batch-size 2048
 
 # Dry run — print commands without executing
 python scripts/run_canonical.py --dry-run
@@ -135,7 +135,7 @@ def main() -> None:
         epilog=__doc__,
     )
     parser.add_argument(
-        "--tokenizer", default=None,
+        "--tokenizer", default="tokenizers/tinystories_bpe4096.pkl",
         help="Path to pre-trained tokenizer.pkl (skips BPE in all phases)",
     )
     parser.add_argument(

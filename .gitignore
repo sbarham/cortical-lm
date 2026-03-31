@@ -43,6 +43,9 @@ MANIFEST
 checkpoints/
 wandb/
 
+# Tokenizers are tracked (small, needed for reproducibility)
+!tokenizers/
+
 # Secrets / environment
 .env
 .env.*

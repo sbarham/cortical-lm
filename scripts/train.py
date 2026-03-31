@@ -185,10 +185,11 @@ def main():
 
     # ── Tokenizer ──────────────────────────────────────────────────────────
     print("[ 1/4 ] Building tokenizer")
-    if args.tokenizer:
+    tokenizer_path = args.tokenizer or config["data"].get("tokenizer_path")
+    if tokenizer_path:
         import pickle
-        print(f"  Loading tokenizer from {args.tokenizer}")
-        with open(args.tokenizer, "rb") as _f:
+        print(f"  Loading tokenizer from {tokenizer_path}")
+        with open(tokenizer_path, "rb") as _f:
             tokenizer = pickle.load(_f)
     else:
         tokenizer = build_tokenizer(config)

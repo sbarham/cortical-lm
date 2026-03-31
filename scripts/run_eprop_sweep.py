@@ -40,19 +40,19 @@ Usage
 -----
 # Sweep 1i-1l with aggressive hybrid (the canonical next experiment)
 python scripts/run_eprop_sweep.py \\
-    --tokenizer checkpoints/canonical-apical/1f/tokenizer.pkl \\
+    --tokenizer tokenizers/tinystories_bpe4096.pkl \\
     --wandb --wandb-project cortex-lm \\
     --runs 1i 1j 1k 1l
 
 # Single run, custom hyperparameters
 python scripts/run_eprop_sweep.py \\
-    --tokenizer checkpoints/canonical-apical/1f/tokenizer.pkl \\
+    --tokenizer tokenizers/tinystories_bpe4096.pkl \\
     --wandb --wandb-project cortex-lm \\
     --runs 1f --rule eprop --tau-e 128 --batch-size 8 --max-tokens 100000000
 
 # Full architecture sweep with default aggressive hybrid
 python scripts/run_eprop_sweep.py \\
-    --tokenizer checkpoints/canonical-apical/1f/tokenizer.pkl \\
+    --tokenizer tokenizers/tinystories_bpe4096.pkl \\
     --wandb --wandb-project cortex-lm \\
     --runs 1a 1b 1c 1d 1f 1j
 
@@ -230,7 +230,7 @@ def main():
     # Experiment selection
     parser.add_argument("--runs", nargs="+", choices=EXP_IDS, default=None,
                         help=f"Variants to run in specified order. Choices: {EXP_IDS}")
-    parser.add_argument("--tokenizer", default=None,
+    parser.add_argument("--tokenizer", default="tokenizers/tinystories_bpe4096.pkl",
                         help="Path to tokenizer.pkl (strongly recommended for comparable ppl).")
 
     # Learning rule

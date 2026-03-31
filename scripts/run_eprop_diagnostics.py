@@ -234,7 +234,7 @@ def main():
                         help="Base learning rate (default: 1e-4).")
 
     # Infrastructure
-    parser.add_argument("--tokenizer", default=None)
+    parser.add_argument("--tokenizer", default="tokenizers/tinystories_bpe4096.pkl")
     parser.add_argument("--device", default=None,
                         help="Device override: cuda, mps, cpu (default: auto).")
     parser.add_argument("--wandb", action="store_true")

@@ -24,19 +24,19 @@ The additive apical pathway is chosen as the screening variant because:
 After this sweep, pick the winning phase and run:
     python scripts/run_apical_variant_sweep.py \\
         --base-config configs/phase1X_<winner>.yaml \\
-        --tokenizer checkpoints/tokenizer.pkl \\
+        --tokenizer tokenizers/tinystories_bpe4096.pkl \\
         --wandb-project cortex-lm --wandb-group apical-variant-sweep-<date>
 
 Usage
 -----
 # Full sweep 1a–1i with additive apical
-python scripts/run_apical_arch_sweep.py --tokenizer checkpoints/tokenizer.pkl --wandb-project cortex-lm
+python scripts/run_apical_arch_sweep.py --tokenizer tokenizers/tinystories_bpe4096.pkl --wandb-project cortex-lm
 
 # Partial sweep (e.g. just Hopfield variants)
-python scripts/run_apical_arch_sweep.py --tokenizer checkpoints/tokenizer.pkl --phases 1f 1g 1h 1i
+python scripts/run_apical_arch_sweep.py --tokenizer tokenizers/tinystories_bpe4096.pkl --phases 1f 1g 1h 1i
 
 # Override batch size
-python scripts/run_apical_arch_sweep.py --tokenizer checkpoints/tokenizer.pkl --batch-size 2048
+python scripts/run_apical_arch_sweep.py --tokenizer tokenizers/tinystories_bpe4096.pkl --batch-size 2048
 
 # Dry run
 python scripts/run_apical_arch_sweep.py --dry-run
@@ -87,7 +87,7 @@ def build_command(phase: str, config: str, args, tokenizer: str | None) -> list[
 
 def main():
     parser = argparse.ArgumentParser(description="Phase 1 architecture sweep with additive apical")
-    parser.add_argument("--tokenizer", default=None,
+    parser.add_argument("--tokenizer", default="tokenizers/tinystories_bpe4096.pkl",
                         help="Pre-trained tokenizer.pkl (recommended — keeps vocab constant)")
     parser.add_argument("--phases", nargs="+", choices=PHASE_IDS, default=None,
                         help="Run only these phases (default: all 1a–1i)")
