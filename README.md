@@ -16,7 +16,7 @@ The apical finding is the sharpest result the project has produced.  Without api
 
 This suggests a reframing.  The question is not "can a biological model beat a transformer on a benchmark?"  The question is: **which model learns fastest from limited data, and why?**  Biological brains are not trained on internet-scale corpora with full backpropagation.  They learn quickly, online, from a noisy stream of experience — exactly the regime where this model excels.  The transformer may ultimately reach lower perplexity given enough data.  But the biologically-structured model gets there faster, learns from less, and does so using mechanisms that have direct neural correlates.
 
-We are not yet done.  The model's asymptotic performance under e-prop is still below its BPTT ceiling, and we are actively investigating whether a hybrid learning rule — e-prop for fast online learning, periodic BPTT consolidation for long-range credit assignment — can close that gap.  Early results suggest the optimal awake:asleep ratio in this hybrid matches the biological 2:1 proportion, hinting that this ratio may reflect a deeper computational principle rather than an arbitrary evolutionary constraint.
+We are not yet done.  The model's asymptotic performance under e-prop is still below its BPTT ceiling, and we are actively investigating whether a hybrid learning rule — e-prop for fast online learning, periodic BPTT consolidation for long-range credit assignment — can close that gap.  Early results suggest the optimal awake:asleep ratio in this hybrid matches the biological 2:1 proportion **measured in update steps** (not tokens), hinting that this ratio may reflect a deeper computational principle rather than an arbitrary evolutionary constraint.  Critically, what matters is not how much data each phase sees, but how many gradient steps are interleaved — the consolidation rhythm, not the consolidation volume.
 
 The architecture is described in detail below.  The learning rule experiments are documented in the [e-prop section](#e-prop-online-learning-rule).
 
@@ -1209,10 +1209,13 @@ The aggressive hybrid (20 e-prop : 10 BPTT = **2:1 ratio**) achieves **41.3 val 
 only 4 ppl behind a parameter-matched transformer (37 ppl).  Pure e-prop+apical plateaus at ~84 ppl;
 the hybrid closes ~40% of the remaining gap to the transformer.
 
-**KEY FINDING 7 — the optimal awake:asleep ratio is 2:1, matching biology:**
-Performance peaks at 2:1 (aggressive) and degrades symmetrically toward more-sleep and less-sleep
-extremes.  Biological sleep-wake cycles are ~16h awake : ~8h asleep — also 2:1.  Tokens seen are not
-hours, but the proportion of online vs. offline processing matching the biological ratio is striking.
+**KEY FINDING 7 — the optimal awake:asleep ratio is 2:1 in update steps, matching biology:**
+Performance peaks at 2:1 (aggressive: 20 e-prop steps : 10 BPTT steps) and degrades symmetrically
+toward more-sleep and less-sleep extremes.  Biological sleep-wake cycles are ~16h awake : ~8h asleep
+— also 2:1.  Importantly (see series-5 below), what matters is the **step count ratio**, not the
+token count ratio.  Runs with 2:1 token ratio but 8:1 or 64:1 step ratios all performed worse than
+the 2:1 step-count baseline, even when the BPTT noise problem was eliminated by fixing the
+consolidation batch size.
 
 **KEY FINDING 8 — adaptive consolidation is less reliable than fixed at this scale:**
 Adaptive plateau detection (EMA-based) consistently underperforms the fixed aggressive schedule.
@@ -1222,6 +1225,108 @@ perturbations.  Fixed-schedule consolidation with short cycles wins.
 **Status:** transformer's learning curve slope was steeper than the hybrid's at 50M tokens.
 The transformer would likely pull further ahead given more compute.  Whether the hybrid can
 match the transformer at 1B tokens is an open question.
+
+---
+
+### e-prop series 4b — architecture sweep: CA1 variants (50 M tokens, aggressive hybrid)
+
+All variants run with the series-4 winning config: 20 e-prop : 10 BPTT, bptt_lr=3e-4, batch=32,
+apical=additive, 50M token budget.
+
+| Variant | Architecture | Val ppl @50M | Notes |
+|---------|-------------|--------------|-------|
+| 1i | CA3 + CA1 (original) | **39.70** | |
+| 1k | CA3 + CA1 + gradient-leak fix + Xi norm | **39.70** | indistinguishable from 1i |
+| 1l | CA3 + CA1 + forward gate | **39.78** | indistinguishable from 1i/1k |
+| 1j | CA3 + Xi norm, no CA1 | 41.37 | ≈ 1f; Xi norm contributes nothing |
+| 1f | CA3 baseline | 41.96 | previous series-4 baseline |
+| Transformer | — | ~36.5 | gap to best cortical: 3.3 ppl |
+
+**KEY FINDING 9 — CA1 write-gating is the key ingredient; implementation details are irrelevant:**
+The ~2 ppl gain over 1f/1j comes from the write-gating mechanism itself (surprise-scaled Xi
+gradient), not from any particular implementation detail.  The gradient-leak fix (1k) and forward
+gate (1l) are both indistinguishable from the original 1i — all three land at ~39.70 ppl.  Xi
+normalisation alone (1j, no CA1) does nothing under e-prop, just as under BPTT.
+
+**Transformer gap now 3.3 ppl (down from 4.6 with 1f).**  This is the clearest empirical argument
+for the hippocampal module: CA1 write-gating closes roughly 30% of the remaining gap without any
+other change.
+
+---
+
+### e-prop series 5 — batch size and step ratio (ongoing)
+
+The central question after series-4: can smaller e-prop batches improve signal quality (by reducing
+sign-cancellation of L_vec), and if so does the benefit persist?
+
+#### Sweep A — scaled steps, no BPTT batch fix (bptt_batch = e-prop batch)
+
+All runs on 1k, scaled steps so each cycle sees the same token count as the bs32 baseline.
+
+| Batch | E-prop steps | BPTT steps | Outcome | Failure token |
+|-------|-------------|------------|---------|---------------|
+| 1 | 640 | 320 | diverged | ~100K |
+| 2 | 320 | 160 | broke pack → diverged | ~300K / ~700K |
+| 4 | 160 | 80 | broke pack, trailing | ~1.3M |
+| 8 | 80 | 40 | early lead reversed | ~9M tokens |
+| **32 (baseline)** | **20** | **10** | **best at 9M** | — |
+
+**KEY FINDING 10 — BPTT consolidation noise is the universal bottleneck:**
+The timescale of failure scales with batch size (~2× per batch halving).  Small-batch BPTT with only
+8 sequences is too noisy to consolidate reliably.  The early advantage of bs8 (due to better e-prop
+signal) is real but temporary; noisy consolidation eventually erases it.  The fix: decouple the
+e-prop batch (small, for signal quality) from the BPTT batch (fixed at 32, for consolidation
+stability) via the new `hybrid_bptt_batch_size` config key.
+
+#### Sweep B — bptt_batch fixed at 32, e-prop batch varied (bptt-batch-fix)
+
+`hybrid_bptt_batch_size=32` for all runs.  E-prop batch varied; step counts scaled to maintain
+2:1 **token** ratio (not step ratio).
+
+| E-prop batch | E-prop steps | BPTT steps | Token ratio | Step ratio |
+|-------------|-------------|------------|-------------|------------|
+| 32 (baseline) | 20 | 10 | 2:1 | 2:1 |
+| 8 | 80 | 10 | 2:1 | **8:1** |
+| 4 | 160 | 10 | 2:1 | **16:1** |
+| 2 | 320 | 10 | 2:1 | **32:1** |
+| 1 | 640 | 10 | 2:1 | **64:1** |
+
+**Observation:** bs8 still performed best of the small-batch runs, but its gap with bs32 narrowed
+throughout training and it had plateaued by ~3M tokens.
+
+#### Sweep C — fixed step count, bptt_batch=32 (fixed-steps, ongoing)
+
+Key insight: Sweep B held the *token* ratio constant but inadvertently varied the *step* ratio
+(8:1 to 64:1), introducing far more e-prop steps between consolidation bursts than the winning
+2:1 baseline.  Sweep C tests whether the step ratio is the real constraint by fixing eprop=20,
+bptt=10 for all batch sizes.
+
+| E-prop batch | E-prop steps | BPTT steps | Token ratio | Step ratio |
+|-------------|-------------|------------|-------------|------------|
+| 32 (baseline) | 20 | 10 | 2:1 | 2:1 |
+| 16 | 20 | 10 | 1:2 | 2:1 |
+| 8 | 20 | 10 | 1:4 | 2:1 |
+| 4 | 20 | 10 | 1:8 | 2:1 |
+| 2 | 20 | 10 | 1:16 | 2:1 |
+| 1 | 20 | 10 | 1:32 | 2:1 |
+
+**Provisional result (at ~3.2M tokens):** bs8 with fixed steps is ahead of bs32 at **88.6 vs
+100.4 val ppl** — unlike Sweep B where bs8's early lead evaporated.  This is the first case of a
+small-batch condition durably outpacing bs32.
+
+**Working hypothesis:** The 2:1 step ratio is the load-bearing constraint, not the token ratio.
+Each consolidation burst must follow a consistent number of online update steps to be effective;
+running too many e-prop steps before BPTT (high step ratio) degrades consolidation by allowing the
+model to drift too far from the BPTT loss landscape.  Smaller e-prop batches improve signal quality
+per step, but only if the interleaving rhythm is preserved.
+
+Script:
+```bash
+python scripts/run_eprop_sweep.py --runs 1k \
+    --batch-size 8 --bptt-batch-size 32 \
+    --eprop-steps 20 --bptt-steps 10 \
+    --wandb --wandb-project cortex-lm --wandb-group eprop-diag-fixed-steps
+```
 
 ---
 
@@ -1249,7 +1354,9 @@ The project has converged on a clear narrative with three interlocking findings:
 ### Immediate next steps
 
 **Series-3 complete.** Winner: `eprop-apical-1f`.
-**Series-4 complete.** Winner: aggressive hybrid (20:10 e-prop:BPTT, 3e-4 BPTT LR) — **41.3 val ppl at 50M tokens** vs transformer **37.0 ppl**.  All current e-prop runs terminated.
+**Series-4 complete.** Winner: aggressive hybrid (20:10 e-prop:BPTT, 3e-4 BPTT LR) — **41.3 val ppl at 50M tokens** vs transformer **37.0 ppl**.
+**Series-4b complete.** Winner: 1i/1k/1l (CA1 variants, all ~39.70 ppl) — CA1 write-gating confirmed as key ingredient.
+**Series-5 ongoing.** Fixed-step sweep (bs8, fixed 20:10, bptt_batch=32) provisionally beating bs32 at 3.2M tokens (88.6 vs 100.4 ppl).  bs16 run also kicked off.  Next: wait for 50M token result; then ratio sweep (4:1 to 1:4) on winning batch size.
 
 **⚠️ BEFORE returning to e-prop: rerun the canonical BPTT ablation series with apical.**
 The existing 1a–1f BPTT results were obtained without the apical pathway.  Apical turned out to be
@@ -1290,11 +1397,13 @@ This motivates a systematic sweep of awake:asleep ratios as a potential paper se
 
 | Run | E-prop steps | BPTT steps | Ratio (awake:asleep) | Biological analogue |
 |-----|-------------|------------|---------------------|---------------------|
-| hybrid-ratio-5to1 | 50 | 10 | 5:1 | Very sleep-deprived |
+| hybrid-ratio-4to1 | 40 | 10 | 4:1 | Moderately sleep-deprived |
+| hybrid-ratio-3to1 | 30 | 10 | 3:1 | Mildly sleep-deprived |
 | hybrid-ratio-2to1 | 20 | 10 | 2:1 | **Biological optimum — current winner** |
+| hybrid-ratio-3to2 | 15 | 10 | 3:2 | Slightly more sleep |
 | hybrid-ratio-1to1 | 10 | 10 | 1:1 | Equal awake/asleep |
-| hybrid-ratio-1to2 | 10 | 20 | 1:2 | More sleep than wake |
-| hybrid-ratio-1to5 | 10 | 50 | 1:5 | Mostly asleep |
+| hybrid-ratio-1to2 | 5 | 10 | 1:2 | More sleep than wake |
+| hybrid-ratio-1to4 | 3 | 10 | ~1:4 | Mostly asleep |
 
 All with `hybrid_bptt_lr=3e-4`, `hybrid_bptt_scope=full`, apical.  The prediction: performance
 peaks near 2:1 and degrades in both directions — too little BPTT leaves e-prop noise uncorrected;

@@ -90,18 +90,32 @@ def tau_e_sweep(values: list[int], eprop_steps: int, bptt_steps: int, bptt_lr: f
     ]
 
 
-def batch_sweep(values: list[int], eprop_steps: int, bptt_steps: int, bptt_lr: float) -> list[dict]:
-    return [
-        {
-            "id":          f"bs{v}",
-            "label":       f"batch_size = {v}",
+def batch_sweep(values: list[int], eprop_steps: int, bptt_steps: int, bptt_lr: float,
+                scale_steps: bool = False, ref_batch: int = 32) -> list[dict]:
+    """
+    Batch size sweep.
+
+    scale_steps=False  Keep eprop_steps/bptt_steps fixed across all batch sizes.
+                       Isolates the sign-cancellation effect: fewer tokens/step,
+                       same gradient step count.
+
+    scale_steps=True   Multiply steps by ref_batch/batch so each cycle sees the
+                       same number of tokens as the ref_batch baseline.  Tests
+                       whether the gain from smaller batch is signal quality
+                       (better e-prop gradient) or simply more frequent updates.
+    """
+    conditions = []
+    for v in values:
+        ratio = ref_batch / v if scale_steps else 1
+        conditions.append({
+            "id":          f"bs{v}" + ("-scaled" if scale_steps else ""),
+            "label":       f"batch={v}" + (f" scaled steps ×{ratio:.0f}" if scale_steps else " fixed steps"),
             "batch_size":  v,
-            "eprop_steps": eprop_steps,
-            "bptt_steps":  bptt_steps,
+            "eprop_steps": round(eprop_steps * ratio),
+            "bptt_steps":  round(bptt_steps * ratio),
             "bptt_lr":     bptt_lr,
-        }
-        for v in values
-    ]
+        })
+    return conditions
 
 
 # ── Command builder ───────────────────────────────────────────────────────────
@@ -148,6 +162,8 @@ def build_command(condition: dict, exp: dict, args: argparse.Namespace) -> list[
         overrides.append(f"data.tokenizer_path={args.tokenizer}")
     if tau_e is not None:
         overrides.append(f"learning.eprop_tau_e={tau_e}")
+    if args.bptt_batch_size is not None:
+        overrides.append(f"learning.hybrid_bptt_batch_size={args.bptt_batch_size}")
 
     log_tokens = min(51_200, args.max_tokens // 20)
     overrides += [
@@ -214,6 +230,9 @@ def main():
     parser.add_argument("--bptt-scope", default="full",
                         choices=["full", "readout_only"],
                         help="BPTT scope (default: full).")
+    parser.add_argument("--bptt-batch-size", type=int, default=None,
+                        help="Batch size for BPTT consolidation phase (default: same as e-prop batch). "
+                             "Set to 32 when sweeping small e-prop batches to stabilise consolidation.")
 
     # Sweep-specific value lists
     parser.add_argument("--tau-e-values", type=int, nargs="+",
@@ -222,6 +241,13 @@ def main():
     parser.add_argument("--batch-values", type=int, nargs="+",
                         default=[32, 16, 8, 4],
                         help="Batch sizes to sweep (default: 32 16 8 4).")
+    parser.add_argument("--scale-steps", action="store_true",
+                        help="Scale eprop/bptt steps by ref_batch/batch so each cycle "
+                             "sees the same token count as the reference batch size.  "
+                             "Run once without and once with to separate signal-quality "
+                             "from update-frequency effects.")
+    parser.add_argument("--ref-batch", type=int, default=32,
+                        help="Reference batch size for step scaling (default: 32).")
 
     # Training
     parser.add_argument("--tau-e", type=int, default=None,
@@ -264,6 +290,8 @@ def main():
             eprop_steps=args.eprop_steps,
             bptt_steps=args.bptt_steps,
             bptt_lr=args.bptt_lr,
+            scale_steps=args.scale_steps,
+            ref_batch=args.ref_batch,
         )
 
     if args.skip:
@@ -277,6 +305,8 @@ def main():
     print(f"  BPTT LR     : {args.bptt_lr}")
     print(f"  W&B group   : {args.wandb_group}")
     print(f"  Tokenizer   : {args.tokenizer or '(from config)'}")
+    if args.sweep == "batch" and args.scale_steps:
+        print(f"  Steps       : scaled (ref_batch={args.ref_batch})")
     if args.device:
         print(f"  Device      : {args.device}")
     if args.dry_run:

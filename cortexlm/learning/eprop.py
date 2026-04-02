@@ -286,12 +286,17 @@ class _EpropBase:
         step        = 0
         tokens_seen = 0
         train_iter  = iter(train_loader)
+        # Expose iterator + loader so subclasses (e.g. hybrid BPTT phase) can pull
+        # additional batches independently of the main e-prop loop.
+        self._train_iter   = train_iter
+        self._train_loader = train_loader
 
         while step < max_steps:
             try:
                 x, y = next(train_iter)
             except StopIteration:
                 train_iter = iter(train_loader)
+                self._train_iter = train_iter
                 x, y = next(train_iter)
 
             if state is None or self.reset_state:
@@ -549,9 +554,13 @@ class EpropHybridTrainer(_EpropBase):
         super().__init__(model, config, device)
         lcfg = config["learning"]
 
-        self.eprop_steps  = lcfg.get("hybrid_eprop_steps", 100)
-        self.bptt_steps   = lcfg.get("hybrid_bptt_steps", 10)
-        self.bptt_scope   = lcfg.get("hybrid_bptt_scope", "readout_only")
+        self.eprop_steps      = lcfg.get("hybrid_eprop_steps", 100)
+        self.bptt_steps       = lcfg.get("hybrid_bptt_steps", 10)
+        self.bptt_scope       = lcfg.get("hybrid_bptt_scope", "readout_only")
+        # Separate batch size for the BPTT consolidation phase.
+        # Allows small e-prop batches (better signal) with larger BPTT batches
+        # (stable gradient estimates).  None = use the same batch as e-prop.
+        self.bptt_batch_size  = lcfg.get("hybrid_bptt_batch_size", None)
         variant           = lcfg.get("hybrid_eprop_variant", "eprop")
 
         # Adaptive BPTT: trigger consolidation based on plateau detection rather
@@ -634,8 +643,31 @@ class EpropHybridTrainer(_EpropBase):
         return loss, state
 
     def _bptt_consolidation_step(self, x, y, state):
+        # If a separate BPTT batch size is configured, pull a fresh batch of that
+        # size from the training iterator, ignoring the small e-prop batch x, y.
+        if self.bptt_batch_size is not None:
+            xs, ys = [], []
+            collected = 0
+            while collected < self.bptt_batch_size:
+                try:
+                    xb, yb = next(self._train_iter)
+                except StopIteration:
+                    self._train_iter = iter(self._train_loader)
+                    xb, yb = next(self._train_iter)
+                xs.append(xb)
+                ys.append(yb)
+                collected += xb.shape[0]
+            x = torch.cat(xs, dim=0)[:self.bptt_batch_size]
+            y = torch.cat(ys, dim=0)[:self.bptt_batch_size]
+
         x, y = x.to(self.device), y.to(self.device)
-        state = state.detach()
+        # If BPTT batch differs from e-prop batch, reinitialize state — the replay
+        # batch is a fresh set of sequences so the e-prop state is mismatched anyway.
+        state_batch = next(iter(state.column_states.values())).shape[0]
+        if x.shape[0] != state_batch:
+            state = self.model.init_state(x.shape[0])
+        else:
+            state = state.detach()
 
         if self.bptt_scope == "full":
             # Full BPTT — update all parameters

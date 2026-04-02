@@ -185,6 +185,8 @@ def build_command(exp: dict, args: argparse.Namespace) -> list[str]:
         overrides.append(f"data.tokenizer_path={args.tokenizer}")
     if args.tau_e is not None:
         overrides.append(f"learning.eprop_tau_e={args.tau_e}")
+    if args.bptt_batch_size is not None:
+        overrides.append(f"learning.hybrid_bptt_batch_size={args.bptt_batch_size}")
 
     # Log frequently enough for e-prop's slow throughput
     log_tokens = min(51_200, args.max_tokens // 20)
@@ -248,10 +250,14 @@ def main():
                         help="BPTT scope: full network or readout only (default: full).")
     parser.add_argument("--tau-e", type=int, default=None,
                         help="Eligibility trace timescale override (default: from config).")
+    parser.add_argument("--bptt-batch-size", type=int, default=None,
+                        help="Batch size for BPTT consolidation phase (default: same as --batch-size). "
+                             "Set larger than --batch-size to stabilise consolidation when using "
+                             "small e-prop batches, e.g. --batch-size 8 --bptt-batch-size 32.")
 
     # Training
     parser.add_argument("--batch-size", type=int, default=32,
-                        help="Batch size (default: 32; keep small to reduce sign cancellation).")
+                        help="Batch size for e-prop phase (default: 32).")
     parser.add_argument("--max-tokens", type=int, default=50_000_000,
                         help="Token budget per run (default: 50M).")
     parser.add_argument("--lr", type=float, default=1e-4,
