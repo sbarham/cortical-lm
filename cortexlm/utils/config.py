@@ -142,6 +142,29 @@ DEFAULT_CONFIG = {
 }
 
 
+def _coerce_numeric_strings(obj):
+    """Recursively convert numeric strings (e.g. '3e-4') to int/float.
+
+    PyYAML's safe_load parses values like '3e-4' as strings rather than floats
+    when they lack a decimal point.  This pass converts them so downstream code
+    can rely on receiving proper numeric types.
+    """
+    if isinstance(obj, dict):
+        return {k: _coerce_numeric_strings(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_coerce_numeric_strings(v) for v in obj]
+    if isinstance(obj, str):
+        try:
+            return int(obj)
+        except ValueError:
+            pass
+        try:
+            return float(obj)
+        except ValueError:
+            pass
+    return obj
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """Recursively merge override into base, returning new dict."""
     result = copy.deepcopy(base)
@@ -164,6 +187,7 @@ def get_config(path: str, overrides: dict = None) -> dict:
     with open(path, "r") as f:
         user_config = yaml.safe_load(f) or {}
 
+    user_config = _coerce_numeric_strings(user_config)
     config = _deep_merge(config, user_config)
 
     if overrides:
