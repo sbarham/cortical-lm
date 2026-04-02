@@ -95,7 +95,7 @@ def _make_run_tag(config: dict) -> str:
 
     # Compact LR: 0.0003 -> 3e-4, 0.001 -> 1e-3
     def fmt_lr(v):
-        s = f"{v:.0e}"                  # e.g. '3e-04'
+        s = f"{float(v):.0e}"           # e.g. '3e-04'
         s = s.replace("e-0", "e-").replace("e+0", "e")  # '3e-4'
         return s
 
