@@ -185,19 +185,25 @@ def main():
 
     # ── Tokenizer ──────────────────────────────────────────────────────────
     print("[ 1/4 ] Building tokenizer")
+    import pickle
     tokenizer_path = args.tokenizer or config["data"].get("tokenizer_path")
-    if tokenizer_path:
-        import pickle
+    if tokenizer_path and os.path.exists(tokenizer_path):
         print(f"  Loading tokenizer from {tokenizer_path}")
         with open(tokenizer_path, "rb") as _f:
             tokenizer = pickle.load(_f)
     else:
+        if tokenizer_path:
+            print(f"  {tokenizer_path} not found — building tokenizer from data")
         tokenizer = build_tokenizer(config)
+        if tokenizer_path:
+            os.makedirs(os.path.dirname(tokenizer_path) or ".", exist_ok=True)
+            with open(tokenizer_path, "wb") as _f:
+                pickle.dump(tokenizer, _f)
+            print(f"  Tokenizer saved → {tokenizer_path}")
     vocab_size = tokenizer.vocab_size
     config["data"]["vocab_size"] = vocab_size
 
-    # Persist tokenizer so post-training scripts don't need to rebuild it
-    import pickle
+    # Persist tokenizer alongside checkpoint so post-training scripts can load it
     ckpt_dir = config["training"].get("checkpoint_dir", "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
     tok_path = os.path.join(ckpt_dir, "tokenizer.pkl")
