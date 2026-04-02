@@ -14,17 +14,20 @@ data:
 # This config is used by scripts/run_baselines.py with --model transformer.
 # Parameter count is matched to scale_5m (primary comparison point).
 
+baseline:
+  n_layers: 6   # depth for binary-searched width; binary search finds d_model ~276 for ~10M params
+
 training:
-  batch_size: 64
-  max_tokens: 1000000000
+  batch_size: 512
+  max_tokens: 100000000
   lr: 3e-4
   weight_decay: 1e-4
   grad_clip: 1.0
   optimizer: adamw
   scheduler: cosine
-  warmup_steps: 2000
-  log_tokens: 1000000
-  eval_tokens: 5000000
+  warmup_steps: 76
+  log_tokens: 100000
+  eval_tokens: 500000
   checkpoint_tokens: 10000000
   bf16: true
   grad_accum_steps: 1

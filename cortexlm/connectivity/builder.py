@@ -186,12 +186,13 @@ class ConnectivityBuilder:
             self.mask = torch.bernoulli(
                 torch.full((n_cols, n_cols), p)
             ).bool()
+        else:
+            raise ValueError(f"Unknown connectivity type: {conn_type}")
 
         if _rng_state is not None:
             torch.set_rng_state(_rng_state)
-            self.mask.fill_diagonal_(False)
-        else:
-            raise ValueError(f"Unknown connectivity type: {conn_type}")
+
+        self.mask.fill_diagonal_(False)
 
     def build(self) -> InterColumnSynapses:
         col_model = self.ccfg["model"]
