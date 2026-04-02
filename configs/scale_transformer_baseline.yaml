@@ -1,0 +1,35 @@
+name: transformer-baseline-scale
+version: "0.1"
+
+data:
+  dataset: wikitext103
+  tokenizer: bpe
+  vocab_size: 16000
+  seq_len: 256
+  bpe_train_sample: 2000000
+  tokenizer_path: tokenizers/wikitext103_bpe16k.pkl
+  wikitext_token_limit: 100000000
+
+# Transformer baseline uses the baselines module — not the CortexLM model.
+# This config is used by scripts/run_baselines.py with --model transformer.
+# Parameter count is matched to scale_5m (primary comparison point).
+
+training:
+  batch_size: 64
+  max_tokens: 1000000000
+  lr: 3e-4
+  weight_decay: 1e-4
+  grad_clip: 1.0
+  optimizer: adamw
+  scheduler: cosine
+  warmup_steps: 2000
+  log_tokens: 1000000
+  eval_tokens: 5000000
+  checkpoint_tokens: 10000000
+  bf16: true
+  grad_accum_steps: 1
+
+logging:
+  wandb: false
+  project: cortex-lm
+  group: scale-v2

@@ -87,6 +87,15 @@ DEFAULT_CONFIG = {
         "dim": 64,
     },
 
+    "thalamus": {
+        "enabled": False,          # false = legacy broadcast (backward compat)
+        "embed_dim_large": 256,    # vocab-facing embedding dimension
+        "col_input_dim": 64,       # column-facing dimension (replaces embed_dim when enabled)
+        "trn_competition": False,  # TRN divisive normalization
+        "trn_eta_init": 0.1,
+        "relay_init_scale": 0.02,
+    },
+
     "learning": {
         "rule": "bptt",                # bptt | eprop
         "truncated_bptt_k": None,
@@ -107,6 +116,9 @@ DEFAULT_CONFIG = {
         "checkpoint_interval": 5000,
         "checkpoint_dir": "checkpoints",
         "seed": 42,
+        "bf16": True,                # bfloat16 autocast on CUDA (no GradScaler needed)
+        "grad_accum_steps": 1,       # gradient accumulation before optimizer.step()
+        "compile": False,            # torch.compile(model) — BPTT only, incompatible with e-prop hooks
     },
 
     "simulation": {
@@ -159,6 +171,20 @@ def get_config(path: str, overrides: dict = None) -> dict:
 
     _validate_config(config)
     return config
+
+
+def get_col_input_dim(config: dict) -> int:
+    """Return the thalamic input dimension received by columns.
+
+    With thalamic relay enabled (thalamus.enabled: true):
+        returns thalamus.col_input_dim (default 64)
+    Without relay:
+        returns embedding.dim (backward compatible with all existing checkpoints)
+    """
+    tcfg = config.get("thalamus", {})
+    if tcfg.get("enabled", False):
+        return tcfg.get("col_input_dim", config.get("embedding", {}).get("dim", 64))
+    return config.get("embedding", {}).get("dim", 64)
 
 
 def _validate_config(cfg: dict):

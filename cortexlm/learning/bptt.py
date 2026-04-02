@@ -106,6 +106,20 @@ class BPTTTrainer:
         self._persistent_state: Optional[ModelState] = None
         self._last_grad_norms: dict = {}
 
+        # Training efficiency flags
+        tcfg_full = config["training"]
+        self.bf16 = (
+            tcfg_full.get("bf16", True)
+            and self.device.type == "cuda"
+        )
+        self.grad_accum_steps = max(1, tcfg_full.get("grad_accum_steps", 1))
+        self._accum_count = 0
+
+        # torch.compile (BPTT only — incompatible with e-prop register_forward_hook)
+        if tcfg_full.get("compile", False):
+            print("  torch.compile enabled (reduce-overhead mode)")
+            self.model = torch.compile(self.model, mode="reduce-overhead")
+
     def _warmup_lr(self):
         """Linear warmup."""
         if self.step_count < self.warmup_steps:
@@ -192,21 +206,39 @@ class BPTTTrainer:
         return loss, model_state
 
     def _full_bptt(self, x, y, state):
-        self.optimizer.zero_grad()
-        logits, new_state = self.model(x, state)
-        # logits: [batch, seq_len, vocab_size]
-        loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)),
-            y.reshape(-1),
-        )
+        is_first_accum = (self._accum_count == 0)
+        is_last_accum  = (self._accum_count == self.grad_accum_steps - 1)
+
+        if is_first_accum:
+            self.optimizer.zero_grad()
+
+        if self.bf16:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                logits, new_state = self.model(x, state)
+                loss = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    y.reshape(-1),
+                ) / self.grad_accum_steps
+        else:
+            logits, new_state = self.model(x, state)
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                y.reshape(-1),
+            ) / self.grad_accum_steps
+
         loss.backward()
-        self._last_grad_norms = self._collect_grad_norms()
-        if self.grad_clip > 0:
-            nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-        self.optimizer.step()
-        self._enforce_dale()
-        self._normalize_xi()
-        return loss.item(), new_state.detach()
+
+        self._accum_count = (self._accum_count + 1) % self.grad_accum_steps
+
+        if is_last_accum:
+            self._last_grad_norms = self._collect_grad_norms()
+            if self.grad_clip > 0:
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+            self.optimizer.step()
+            self._enforce_dale()
+            self._normalize_xi()
+
+        return loss.item() * self.grad_accum_steps, new_state.detach()
 
     def _truncated_bptt(self, x, y, state):
         k = self.truncated_k

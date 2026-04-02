@@ -12,6 +12,8 @@ from cortexlm.columns import get_batched_columns
 from cortexlm.connectivity.builder import ConnectivityBuilder
 from cortexlm.hippocampus import get_hippocampus
 from cortexlm.readout import ReadoutHead
+from cortexlm.thalamus import ThalamicRelayModule
+from cortexlm.utils.config import get_col_input_dim
 
 
 @dataclass
@@ -56,7 +58,8 @@ class CortexLM(nn.Module):
         ccfg = config["column"]
         self.n_columns = ccfg["n_columns"]
         col_model = ccfg["model"]
-        embed_dim  = config["embedding"]["dim"]
+        embed_dim  = config["embedding"]["dim"]   # vocab-facing (always)
+        col_input_dim = get_col_input_dim(config)  # column-facing (may differ with relay)
 
         # Determine L5 output size for readout
         if col_model == "layered":
@@ -67,8 +70,23 @@ class CortexLM(nn.Module):
             self.n_l5e  = ccfg.get("n_e", 80)
             self.n_l23e = self.n_l5e
 
-        # Token embedding
+        # Token embedding — always sized to embed_dim (vocab-facing)
         self.embedding = nn.Embedding(vocab_size, embed_dim)
+
+        # Thalamic relay (optional): rich embedding → per-column col_input_dim projection
+        tcfg = config.get("thalamus", {})
+        self._thalamus_enabled = tcfg.get("enabled", False)
+        if self._thalamus_enabled:
+            self.thalamic_relay = ThalamicRelayModule(
+                n_cols=self.n_columns,
+                embed_dim_large=embed_dim,
+                col_input_dim=col_input_dim,
+                trn_competition=tcfg.get("trn_competition", False),
+                trn_eta_init=tcfg.get("trn_eta_init", 0.1),
+                relay_init_scale=tcfg.get("relay_init_scale", 0.02),
+            )
+        else:
+            self.thalamic_relay = None
 
         # Cortical columns — single batched module processes all columns in parallel
         self.columns = get_batched_columns(config, self.n_columns)
@@ -82,7 +100,9 @@ class CortexLM(nn.Module):
 
         # Hippocampal modulation projection (per-column, mod_dim → 1 scalar added to input)
         hpc_mod_dim = getattr(self.hippocampus, "modulation_dim", 1)
-        self.hpc_input_proj = nn.Linear(hpc_mod_dim, embed_dim, bias=False)
+        # HPC modulation projects to col_input_dim (column-facing), not embed_dim
+        self.hpc_input_proj = nn.Linear(hpc_mod_dim, col_input_dim, bias=False)
+        self._col_input_dim = col_input_dim
 
         # Readout
         readout_source = config.get("readout", {}).get("source", "l5")
@@ -128,35 +148,45 @@ class CortexLM(nn.Module):
         device = token_ids.device
         n_cols = self.n_columns
 
-        # Token embedding — shared thalamic base for all columns
-        tok_emb = self.embedding(token_ids)   # [batch, embed_dim]
+        # Token embedding — [batch, embed_dim] (always vocab-facing)
+        tok_emb = self.embedding(token_ids)
 
-        # Inter-column signals from previous state
+        # Inter-column signals from previous state → [batch, n_cols, col_input_dim]
         prev_lo = self._col_state_to_list(model_state.column_states, batch, device)
-        col_increments = self.connectivity(prev_lo)   # List[Dict]
+        col_increments = self.connectivity(prev_lo)
 
-        # Stack connectivity outputs to [batch, n_cols, *]
         thal_inc = torch.stack(
             [col_increments[i]["thalamic_input"] for i in range(n_cols)], dim=1
-        )   # [batch, n_cols, embed_dim]
+        )   # [batch, n_cols, col_input_dim]
         l23_fb = torch.stack(
             [col_increments[i]["l23_feedback"] for i in range(n_cols)], dim=1
         )   # [batch, n_cols, n_l23e]
 
-        # Hippocampal modulation: project to embed_dim and add to thalamic increment
+        # Hippocampal modulation: project to col_input_dim and add to thalamic increment
         l5_concat = self._get_l5_concat(model_state.column_states, device, batch)
         hpc_mod, hpc_surprise = self.hippocampus(l5_concat)   # [batch, n_cols, mod_dim]
         thal_inc = thal_inc + self.hpc_input_proj(hpc_mod)
-        # hpc_surprise: [batch, 1] scalar mismatch norm (CA1 only), or None.
-        # Stored as attribute so the trainer can log it without changing step() signature.
         self._last_hpc_surprise = (
             hpc_surprise.mean().item() if hpc_surprise is not None else None
         )
 
-        # Single batched column forward
-        layer_out, new_col_state = self.columns(
-            tok_emb, thal_inc, l23_fb, model_state.column_states
-        )
+        # Thalamic relay or legacy broadcast
+        if self._thalamus_enabled:
+            # Relay: tok_emb → per-column col_input_dim; fold into thal_inc
+            thal_base = self.thalamic_relay(tok_emb)  # [batch, n_cols, col_input_dim]
+            thal_inc = thal_inc + thal_base
+            # Pass zeros for broadcast; apical_signal carries full embedding to L5
+            thal_broadcast = tok_emb.new_zeros(batch, self._col_input_dim)
+            apical_signal = tok_emb.unsqueeze(1).expand(-1, n_cols, -1)  # [batch, n_cols, embed_dim]
+            layer_out, new_col_state = self.columns(
+                thal_broadcast, thal_inc, l23_fb, model_state.column_states,
+                apical_signal=apical_signal,
+            )
+        else:
+            # Legacy: broadcast tok_emb directly; no apical_signal override
+            layer_out, new_col_state = self.columns(
+                tok_emb, thal_inc, l23_fb, model_state.column_states
+            )
         # layer_out: {"l5_out": [batch, n_cols, n_l5e], ...}
 
         new_state = ModelState(

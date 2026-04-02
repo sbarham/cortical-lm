@@ -263,7 +263,9 @@ class BatchedLayeredColumns(nn.Module):
         super().__init__()
         ccfg = config["column"]
         ls = ccfg.get("layer_sizes", {})
-        embed_dim = config["embedding"]["dim"]
+        embed_dim = config["embedding"]["dim"]          # for ApicalPathway (vocab-facing)
+        from cortexlm.utils.config import get_col_input_dim
+        col_input_dim = get_col_input_dim(config)       # for thalamic projections to L4
         self.n_cols = n_cols
 
         self.n_l4e  = ls.get("l4",  {}).get("n_e", 80)
@@ -282,11 +284,12 @@ class BatchedLayeredColumns(nn.Module):
         self.l5_e,  self.l5_i  = _pop(self.n_l5e),  _pop(self.n_l5i)
         self.l6_e,  self.l6_i  = _pop(self.n_l6e),  _pop(self.n_l6i)
 
-        # Batched thalamic projections: [n_cols, n_l4e/i, embed_dim]
-        # Fan-in = embed_dim; use 1/sqrt(embed_dim) so input variance ≈ 1 at init
+        # Batched thalamic projections: [n_cols, n_l4e/i, col_input_dim]
+        # Fan-in = col_input_dim; use 1/sqrt(col_input_dim) so input variance ≈ 1 at init
         import math as _math
-        self.thal_proj_e_w = nn.Parameter(torch.randn(n_cols, self.n_l4e, embed_dim) * (1.0 / _math.sqrt(embed_dim)))
-        self.thal_proj_i_w = nn.Parameter(torch.randn(n_cols, self.n_l4i, embed_dim) * (1.0 / _math.sqrt(embed_dim)))
+        # Thalamic projections to L4: fan-in = col_input_dim
+        self.thal_proj_e_w = nn.Parameter(torch.randn(n_cols, self.n_l4e, col_input_dim) * (1.0 / _math.sqrt(col_input_dim)))
+        self.thal_proj_i_w = nn.Parameter(torch.randn(n_cols, self.n_l4i, col_input_dim) * (1.0 / _math.sqrt(col_input_dim)))
 
         # Batched L2/3 feedback projection: [n_cols, n_l23e, n_l23e]
         # Fan-in = n_l23e
@@ -424,10 +427,11 @@ class BatchedLayeredColumns(nn.Module):
 
     def forward(
         self,
-        thal: torch.Tensor,             # [batch, embed_dim]
-        thal_increments: torch.Tensor,  # [batch, n_cols, embed_dim]
+        thal: torch.Tensor,             # [batch, col_input_dim]
+        thal_increments: torch.Tensor,  # [batch, n_cols, col_input_dim]
         l23_fb: torch.Tensor,           # [batch, n_cols, n_l23e]
         state: Dict[str, torch.Tensor],
+        apical_signal: torch.Tensor | None = None,  # [batch, n_cols, embed_dim_large] or None
     ) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         batch, n_cols = thal_increments.shape[:2]
 
@@ -496,11 +500,14 @@ class BatchedLayeredColumns(nn.Module):
                  + self.syn_l5_ei(r_l5e,         z0(batch, n_cols, 0)))
 
         # Apical pathway: embed → L5E (skip / additive / multiplicative)
+        # When thalamic relay is active, apical_signal carries the full vocab-facing
+        # embedding; otherwise use thal_full (legacy behavior).
         if self.apical is not None:
-            apical_add = self.apical.l5_additive(thal_full)
+            _thal_apical = apical_signal if apical_signal is not None else thal_full
+            apical_add = self.apical.l5_additive(_thal_apical)
             if apical_add is not None:
                 I_l5e = I_l5e + apical_add
-            I_l5e = self.apical.l5_multiplicative(I_l5e, thal_full)
+            I_l5e = self.apical.l5_multiplicative(I_l5e, _thal_apical)
 
         if self.disinhibition:
             r_l5vip = state["r_l5vip"]

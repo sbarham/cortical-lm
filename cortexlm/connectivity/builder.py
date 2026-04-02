@@ -148,12 +148,33 @@ class ConnectivityBuilder:
         n_cols = self.ccfg["n_columns"]
         conn_type = self.conn_cfg["type"]
 
+        # Seed the mask generation for reproducibility.  Setting connectivity.seed
+        # ensures relay and no-relay variants at the same scale share an identical
+        # connectivity graph, which is required for a clean ablation.
+        seed = self.conn_cfg.get("seed", None)
+        _rng_state = None
+        if seed is not None:
+            _rng_state = torch.get_rng_state()
+            torch.manual_seed(seed)
+
         if conn_type == "gaussian_1d":
+            # Default sigma scales with n_cols (3.0 at 8 cols; n_cols/8 at larger scales)
+            sigma_default = n_cols / 8.0
             self.mask = gaussian_connectivity_mask(
                 n_cols,
                 self.conn_cfg.get("p_max", 0.7),
-                self.conn_cfg.get("sigma", 3.0),
+                self.conn_cfg.get("sigma", sigma_default),
             )
+            # Apply sparse_threshold: zero out connections with probability below threshold
+            sparse_threshold = self.conn_cfg.get("sparse_threshold", 0.0)
+            if sparse_threshold > 0.0:
+                sigma_used = self.conn_cfg.get("sigma", sigma_default)
+                from .local import gaussian_connectivity_probs
+                probs = gaussian_connectivity_probs(n_cols, self.conn_cfg.get("p_max", 0.7), sigma_used)
+                self.mask = self.mask & (probs >= sparse_threshold)
+                sparsity = 1.0 - self.mask.float().mean().item()
+                print(f"  Connectivity: sparse_threshold={sparse_threshold}, "
+                      f"sparsity={sparsity:.1%} ({self.mask.sum().item()} connections)")
         elif conn_type == "small_world":
             self.mask = small_world_connectivity_mask(
                 n_cols,
@@ -165,6 +186,9 @@ class ConnectivityBuilder:
             self.mask = torch.bernoulli(
                 torch.full((n_cols, n_cols), p)
             ).bool()
+
+        if _rng_state is not None:
+            torch.set_rng_state(_rng_state)
             self.mask.fill_diagonal_(False)
         else:
             raise ValueError(f"Unknown connectivity type: {conn_type}")
@@ -172,7 +196,8 @@ class ConnectivityBuilder:
     def build(self) -> InterColumnSynapses:
         col_model = self.ccfg["model"]
         ls = self.ccfg.get("layer_sizes", {})
-        embed_dim = self.config["embedding"]["dim"]
+        from cortexlm.utils.config import get_col_input_dim
+        embed_dim = get_col_input_dim(self.config)   # col_input_dim (may differ from embedding.dim with relay)
 
         if col_model == "layered":
             n_l23e = ls.get("l23", {}).get("n_e", 160)

@@ -935,6 +935,110 @@ dynamics is not feasible.  Some form of parallel training is a prerequisite.
 
 ---
 
+## Scale-v2: first push toward scaling (WikiText-103, 1M–5M cortical params)
+
+Branch: `scale-v2`.  All configs in `configs/scale_*`.  Parameter audit: `python scripts/count_params.py --config <config>`.
+
+### Motivation
+
+The TinyStories experiments establish that the hippocampal module and apical pathway are the key ingredients at ~650K parameters.  Before committing to a full scaling study we need to answer two prior questions:
+
+1. Do these gains survive at larger scale (1–5M cortical params, WikiText-103)?
+2. Does the new **thalamic relay module** — which gives each column a differentiated, learned projection of the token embedding — provide an additional benefit over the legacy uniform broadcast?
+
+These questions are answered by six runs across three scales, each with and without the relay.
+
+### New architectural module: thalamic relay
+
+`cortexlm/thalamus.py` — `ThalamicRelayModule`.
+
+In the legacy architecture all columns receive the same token embedding broadcast uniformly. The relay replaces this with a per-column learned projection:
+
+```
+W_relay: [n_cols, col_input_dim, embed_dim_large]
+thal_c = einsum("be,cde->bcd", tok_emb, W_relay)   # [batch, n_cols, col_input_dim]
+```
+
+Each column now receives a *different* linear transformation of a richer embedding (`embed_dim_large`), analogous to how different thalamocortical nuclei project to different cortical areas with different selectivities.  The apical pathway receives the full `embed_dim_large` signal separately, preserving semantic richness for top-down modulation even at the reduced L4 input dimensionality.
+
+Activated by a single flag: `thalamus.enabled: true`.  When disabled, the legacy broadcast path is fully restored — all existing configs are unaffected.
+
+An optional **TRN (thalamic reticular nucleus) competition** term provides divisive normalisation across columns: `thal_c / (1 + eta * mean_norm_cols)` with learnable scalar `eta` (`trn_competition: true`).  Disabled in the current scale configs.
+
+### Scaling design principles
+
+**`embed_dim_large` and `col_input_dim` scale with cortical capacity**, following `col_input_dim = embed_dim_large / 4` at medium and large scale, with `col_input_dim` floored at 32 for the small config:
+
+| Scale | embed_dim_large | col_input_dim |
+|-------|:--------------:|:-------------:|
+| small | 64 | 32 |
+| medium | 128 | 32 |
+| large | 256 | 64 |
+
+This keeps the thalamic information budget proportional to the cortex being driven and avoids the relay becoming a bottleneck at small scale (the strict 1:4 ratio would give `col_input_dim=16` for the small config, narrower than the legacy architecture it replaces).
+
+**Embedding dimension scales with `embed_dim_large`** (`embedding.dim = embed_dim_large`), keeping the peripheral fraction (embedding + readout as % of total) roughly constant across scales rather than letting a fixed embedding dominate small models.
+
+**Cortical parameter count** (relay + columns + inter-column connectivity + hippocampus) scales approximately 2.5× at each step: ~1M → ~2.5M → ~5M.  Column counts scale 16 → 24 → 32 with layer sizes also growing, so both topographic extent and per-column richness increase together.
+
+**HPC fraction held at ~15–20% of cortical** across all three scales.  The small config runs slightly lower (~13%) because the hippocampal module has a practical floor.  A systematic sweep of `n_memories` × `d_model` is planned at the medium scale once the primary scaling results are in (see *Future architectural refinements* below).
+
+**Connectivity is seeded** (`connectivity.seed: 42`) to ensure relay and no-relay variants at each scale share an identical inter-column connectivity graph.  Without this, `gaussian_connectivity_mask` samples a fresh Bernoulli mask on every instantiation, making relay vs. no-relay comparisons a mild confound.
+
+### Six-config design
+
+All configs use WikiText-103, 16k BPE vocab, `seq_len=256`, AdEx neurons, additive apical pathway, BPTT.
+
+| | scale_1m<br>relay | scale_1m<br>no-relay | scale_4m<br>relay | scale_4m<br>no-relay | scale_5m<br>relay | scale_5m<br>no-relay |
+|---|---:|---:|---:|---:|---:|---:|
+| n_columns | 16 | 16 | 24 | 24 | 32 | 32 |
+| L4/L23 E cells | 40/80 | 40/80 | 48/96 | 48/96 | 52/104 | 52/104 |
+| embed_dim_large | 64 | — | 128 | — | 256 | — |
+| embed_dim (no-relay) | — | 32 | — | 32 | — | 64 |
+| col_input_dim | 32 | 32 | 32 | 32 | 64 | 64 |
+| n_memories / d_model | 256/128 | 256/128 | 512/256 | 512/256 | 1024/256 | 1024/256 |
+| **Cortical params** | **~1.01M** | **~957K** | **~2.41M** | **~2.23M** | **~4.71M** | **~3.85M** |
+| Inter-col params | 189,440 | 189,440 | 370,176 | 370,176 | 851,136 | 851,136 |
+| **Total params** | **~2.29M** | **~1.71M** | **~5.40M** | **~3.61M** | **~10.1M** | **~6.04M** |
+| HPC % of cortical | 13% | 14% | 20% | 22% | 16% | 20% |
+| Peripheral % | 45% | 30% | 38% | 14% | 41% | 17% |
+
+*Inter-col params are identical within each scale pair — confirmed after adding `connectivity.seed: 42`.*
+
+### The relay ablation question, stated precisely
+
+> *Given the same cortical column architecture and hippocampal capacity, does routing the token embedding through a per-column thalamic relay — rather than broadcasting a uniform narrower embedding to all columns identically — improve language modelling, and does the benefit scale with cortical capacity?*
+
+**Why cortical params are not exactly identical** across relay and no-relay variants: the apical pathway inside each column receives `embed_dim_large` in the relay variant but only `embed_dim` (= `col_input_dim`) in the no-relay variant, because the relay provides a richer top-down signal to the apical compartment.  The 5–18% cortical param difference is not a confound — it is part of what the relay contributes.  The relay enriches both the L4 feedforward input (per-column differentiation) and the apical signal (richer semantic context).  The ablation tests the full relay contribution as a unit.
+
+**One interpretive note on the large no-relay variant:** `scale_5m_no_relay` uses `embed_dim=64`, which is richer than any prior cortex-lm model (TinyStories models used `embed_dim=32`).  If this variant performs well, part of the gain may come from the broader broadcast embedding rather than column architecture alone.  This is documented in the config comment and should be acknowledged in any paper discussion.
+
+A third variant — large uniform broadcast embedding, no per-column differentiation — would isolate embedding richness from routing.  This is a second-order experiment; the primary relay on/off comparison should be run first.
+
+### Infrastructure changes (scale-v2 branch only)
+
+| File | Change |
+|------|--------|
+| `cortexlm/thalamus.py` | New: `ThalamicRelayModule` with optional TRN competition |
+| `cortexlm/model.py` | Relay path in `step()`, `hpc_input_proj` uses `col_input_dim` |
+| `cortexlm/columns/layered.py` | `thal_proj_e/i_w` use `col_input_dim`; `forward()` accepts optional `apical_signal` |
+| `cortexlm/connectivity/builder.py` | Sigma scales as `n_cols/8`; `sparse_threshold` support; `connectivity.seed` for deterministic masks |
+| `cortexlm/learning/bptt.py` | bf16 autocast; gradient accumulation; optional `torch.compile` (BPTT only) |
+| `cortexlm/utils/config.py` | `thalamus` config section; `get_col_input_dim()` helper; `bf16`/`grad_accum_steps`/`compile` training fields |
+| `scripts/count_params.py` | New: parameter breakdown by component with peripheral dominance warning |
+
+All changes are backward-compatible.  The relay is gated behind `thalamus.enabled: false` (default); all existing `phase1*` configs run identically.
+
+### Immediate next steps
+
+1. Train tokenizer on WikiText-103 (`tokenizers/wikitext103_bpe16k.pkl`) if not already cached
+2. Run `scripts/count_params.py` on all six configs before launching (already done; output verified)
+3. Launch all six runs on H100 — six independent jobs, no dependencies
+4. Compare relay vs. no-relay at each scale; check whether relay benefit scales
+5. Once primary results are in: HPC hyperparameter sweep at medium scale (see *Hippocampal hyperparameter sweep at scale* in *Future architectural refinements*)
+
+---
+
 ## Learning rule exploration
 
 Three learning rule variants are implemented, configurable via `learning.rule`:
@@ -1918,6 +2022,11 @@ Dopamine, acetylcholine, and norepinephrine globally modulate cortical excitabil
 
 ### Scaling the number of columns and neurons
 The ablation configs use 8–16 columns with small neuron counts. A natural next experiment after the ablation series: hold architecture constant and scale up (32+ columns, larger layer sizes), to check whether the bio-plausible architecture benefits from scale in the same way transformers do.
+
+### Hippocampal hyperparameter sweep at scale *(planned)*
+In the current ~650K TinyStories models, the hippocampal module (CA3 Hopfield memory bank) represents approximately **29% of cortical parameters** (`n_memories=512`, `d_model=256`). In the scale-v2 configs this proportion is not held constant — it falls from ~38% at 1M cortical params to ~12% at 7M, because `n_memories` and `d_model` are fixed while column capacity grows. This is an intentional deferral: the right values of `n_memories`, `d_model`, and the CA1 gate hyperparameters almost certainly depend on task and scale, and sweeping them on a small model may give misleading results.
+
+The planned experiment, once the scale-v2 runs are complete, is a factorial sweep of hippocampal capacity at the medium scale (scale_4m_cortical): varying `n_memories` ∈ {256, 512, 1024, 2048} and `d_model` ∈ {128, 256, 512} to find the proportion that maximises performance, then holding that proportion fixed for the full scaling series. A biologically motivated prior is that hippocampal capacity should scale sub-linearly with cortical capacity (pattern-separated memories are expensive; the cortex itself performs incremental compression), so we expect diminishing returns beyond some threshold.
 
 ---
 
