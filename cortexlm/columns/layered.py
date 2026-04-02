@@ -394,6 +394,16 @@ class BatchedLayeredColumns(nn.Module):
             self.syn_l5_vip_sst  = BatchedStaticSynapse(n_cols, 0, self.n_l5vip,  self.n_l5i)
             self.syn_l6_vip_sst  = BatchedStaticSynapse(n_cols, 0, self.n_l6vip,  self.n_l6i)
 
+        # ── L6 → thalamic relay shortcut ─────────────────────────────────────
+        # Biological motivation: L6 projects to thalamic relay nuclei which
+        # drive L4, giving L6 a 2-step gradient path (L6→relay→L4) instead of
+        # the 4-step default (L6→L4→L23→L5→readout).
+        self.l6_thalamic_shortcut = ccfg.get("l6_thalamic_shortcut", False)
+        if self.l6_thalamic_shortcut:
+            self.W_l6_relay = nn.Parameter(
+                torch.randn(n_cols, col_input_dim, self.n_l6e) * 0.01
+            )
+
     # ── helpers ──────────────────────────────────────────────────────────────
 
     def set_disinhibition_scale(self, scale: float) -> None:
@@ -438,14 +448,19 @@ class BatchedLayeredColumns(nn.Module):
         # Thalamic input: broadcast base embedding + per-column increments → [batch, n_cols, embed_dim]
         thal_full = thal.unsqueeze(1).expand(-1, n_cols, -1) + thal_increments
 
-        # Thalamic projections to L4
-        I_thal_e = torch.einsum("bce,coe->bco", thal_full, self.thal_proj_e_w)
-        I_thal_i = torch.einsum("bce,coe->bco", thal_full, self.thal_proj_i_w)
-
         r_l4e  = state["r_l4e"];  r_l4i  = state["r_l4i"]
         r_l23e = state["r_l23e"]; r_l23i = state["r_l23i"]
         r_l5e  = state["r_l5e"];  r_l5i  = state["r_l5i"]
         r_l6e  = state["r_l6e"];  r_l6i  = state["r_l6i"]
+
+        # L6→relay shortcut: previous-timestep L6_E feeds back into thalamic input
+        # giving L6 a short gradient path to L4 (biologically: L6→thalamus→L4).
+        if self.l6_thalamic_shortcut:
+            thal_full = thal_full + torch.einsum("bcn,con->bco", r_l6e, self.W_l6_relay)
+
+        # Thalamic projections to L4
+        I_thal_e = torch.einsum("bce,coe->bco", thal_full, self.thal_proj_e_w)
+        I_thal_i = torch.einsum("bce,coe->bco", thal_full, self.thal_proj_i_w)
 
         z0 = r_l4e.new_zeros  # shorthand
 

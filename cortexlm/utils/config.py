@@ -50,6 +50,7 @@ DEFAULT_CONFIG = {
         "model": "layered",            # simple_ei | layered
         "n_columns": 16,
         "disinhibition": False,
+        "l6_thalamic_shortcut": False, # L6_E → relay shortcut for shorter gradient path
         "layer_sizes": {
             "l4":  {"n_e": 80,  "n_i": 20},
             "l23": {"n_e": 160, "n_i": 40},
@@ -75,6 +76,10 @@ DEFAULT_CONFIG = {
         "d_model": 256,
         "beta": 1.0,
         "ca1": False,
+        "normalize_query_forward": False,  # L2-normalize query+Xi in forward pass (fixes score collapse)
+        "beta_init": None,             # if set, anneal beta from beta_init → beta over beta_anneal_frac of training
+        "beta_anneal_frac": 0.25,      # fraction of max_steps over which beta annealing occurs
+        "xi_slow_lr_multiplier": 1.0,  # lr multiplier for Xi param group (0.1 = slow Xi)
     },
 
     "readout": {

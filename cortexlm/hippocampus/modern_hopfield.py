@@ -58,13 +58,18 @@ class ModernHopfieldHippocampus(HippocampalModule):
         super().__init__(config, n_columns, n_l5e)
 
         hcfg = config["hippocampus"]
-        self.n_memories       = hcfg.get("n_memories", 512)
-        self.d_model          = hcfg.get("d_model", 256)
-        self.beta             = hcfg.get("beta", 1.0)
-        self.ca1              = hcfg.get("ca1", False)
-        self.normalize_xi     = hcfg.get("normalize_xi", False)
-        self.gated_error_vec  = hcfg.get("gated_error_vec", False)
-        self.forward_gate_ca1 = hcfg.get("forward_gate_ca1", False)
+        self.n_memories            = hcfg.get("n_memories", 512)
+        self.d_model               = hcfg.get("d_model", 256)
+        self.beta                  = hcfg.get("beta", 1.0)
+        self.ca1                   = hcfg.get("ca1", False)
+        self.normalize_xi          = hcfg.get("normalize_xi", False)
+        self.gated_error_vec       = hcfg.get("gated_error_vec", False)
+        self.forward_gate_ca1      = hcfg.get("forward_gate_ca1", False)
+        self.normalize_query_forward = hcfg.get("normalize_query_forward", False)
+        self.beta_init             = hcfg.get("beta_init", None)
+        self.beta_anneal_frac      = hcfg.get("beta_anneal_frac", 0.25)
+        # Current beta (updated each step when annealing is active)
+        self._beta_current = float(self.beta_init) if self.beta_init is not None else self.beta
 
         cortical_dim = n_columns * n_l5e  # concatenated L5 across all columns
 
@@ -104,9 +109,16 @@ class ModernHopfieldHippocampus(HippocampalModule):
         query = self.query_proj(cortical_state_l5)   # [batch, d_model]
 
         # Modern Hopfield retrieval:
-        # attention = softmax(β · Xi^T · query^T)   Xi: [M, d], query: [B, d]
-        # scores: [B, M]
-        scores = self.beta * (query @ self.Xi.t())   # [batch, n_memories]
+        # Optionally normalize query and Xi to unit sphere so scores are cosine
+        # similarities in [-1, 1] regardless of magnitude (fixes uniform-attention trap).
+        if self.normalize_query_forward:
+            query_n = F.normalize(query, dim=-1)
+            Xi_n    = F.normalize(self.Xi, dim=-1)
+        else:
+            query_n = query
+            Xi_n    = self.Xi
+
+        scores = self._beta_current * (query_n @ Xi_n.t())   # [batch, n_memories]
         weights = F.softmax(scores, dim=-1)           # [batch, n_memories]
         self._last_attn_weights = weights.detach()    # store for diagnostics
 
@@ -166,6 +178,18 @@ class ModernHopfieldHippocampus(HippocampalModule):
             modulation = mod_flat.view(batch, self.n_columns, self.modulation_dim)
 
         return modulation, surprise
+
+    def update_beta(self, current_step: int, max_steps: int) -> None:
+        """Linear beta annealing: beta_init → beta over first beta_anneal_frac * max_steps steps.
+
+        Call from the trainer at each step before forward pass.
+        No-op when beta_init is None (no annealing configured).
+        """
+        if self.beta_init is None:
+            return
+        anneal_steps = max(1, int(self.beta_anneal_frac * max_steps))
+        frac = min(current_step, anneal_steps) / anneal_steps
+        self._beta_current = self.beta_init + (self.beta - self.beta_init) * frac
 
     def normalize_xi_rows(self) -> None:
         """Normalize Xi rows to unit sphere (call from trainer after optimizer.step()).

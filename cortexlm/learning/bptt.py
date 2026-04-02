@@ -69,10 +69,25 @@ class BPTTTrainer:
         lr = tcfg.get("lr", 3e-4)
         wd = tcfg.get("weight_decay", 1e-4)
 
-        if opt_name == "adamw":
-            self.optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+        xi_lr_mult = config.get("hippocampus", {}).get("xi_slow_lr_multiplier", 1.0)
+        if xi_lr_mult != 1.0 and hasattr(model, "hippocampus") and hasattr(model.hippocampus, "Xi"):
+            xi_params = [model.hippocampus.Xi]
+            xi_ids = {id(p) for p in xi_params}
+            other_params = [p for p in model.parameters() if id(p) not in xi_ids]
+            param_groups = [
+                {"params": other_params,  "lr": lr,              "initial_lr": lr},
+                {"params": xi_params,     "lr": lr * xi_lr_mult, "initial_lr": lr * xi_lr_mult,
+                 "name": "Xi_slow"},
+            ]
+            if opt_name == "adamw":
+                self.optimizer = torch.optim.AdamW(param_groups, weight_decay=wd)
+            else:
+                self.optimizer = torch.optim.Adam(param_groups, weight_decay=wd)
         else:
-            self.optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+            if opt_name == "adamw":
+                self.optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+            else:
+                self.optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
 
         self.grad_clip = tcfg.get("grad_clip", 1.0)
         self.truncated_k = config["learning"].get("truncated_bptt_k", None)
@@ -158,6 +173,7 @@ class BPTTTrainer:
             # ── Feedback loop: L5 → L6 → L4 ──────────────────────────────────
             "grad/l5_to_l6":        getattr(getattr(cols, "syn_l5e_l6e",   None), "W_e_raw", None),
             "grad/l6_to_l4":        getattr(getattr(cols, "syn_l6e_l4e",   None), "W_e_raw", None),
+            "grad/l6_relay":        getattr(cols, "W_l6_relay", None),
             # ── Within-L4 recurrent ───────────────────────────────────────────
             "grad/l4_recurrent":    getattr(getattr(cols, "syn_l4_ee",     None), "W_e_raw", None),
             # ── Readout ───────────────────────────────────────────────────────
@@ -291,6 +307,14 @@ class BPTTTrainer:
         tokens_seen = 0
         train_iter = iter(train_loader)
 
+        # HPC beta annealing setup
+        _hpc = getattr(self.model, "hippocampus", None)
+        _hpc_beta_anneal = (
+            _hpc is not None
+            and hasattr(_hpc, "update_beta")
+            and getattr(_hpc, "beta_init", None) is not None
+        )
+
         pbar = tqdm(total=max_steps, unit="step", dynamic_ncols=True)
         pbar.set_description("training")
 
@@ -310,6 +334,10 @@ class BPTTTrainer:
             if cols is not None and getattr(cols, "disinhibition_anneal_tokens", 0) > 0:
                 scale = max(0.0, 1.0 - tokens_seen / cols.disinhibition_anneal_tokens)
                 cols.set_disinhibition_scale(scale)
+
+            # HPC beta annealing: step beta_init → beta over first beta_anneal_frac of training
+            if _hpc_beta_anneal:
+                _hpc.update_beta(step, max_steps)
 
             # Initialize or reuse persistent state
             if self._persistent_state is None or self.reset_state:
@@ -348,6 +376,8 @@ class BPTTTrainer:
                     _cols = getattr(self.model, "columns", None)
                     if _cols is not None and getattr(_cols, "disinhibition_anneal_tokens", 0) > 0:
                         log_dict["disinhibition/scale"] = _cols._disinhibition_scale
+                    if _hpc_beta_anneal:
+                        log_dict["hpc/beta"] = _hpc._beta_current
                     logger.log(log_dict, step=step)
 
             if step % eval_interval == 0:
