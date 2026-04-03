@@ -564,25 +564,34 @@ class BPTTTrainer:
         batch, seq_len = x.shape
         state = self.model.init_state(batch)
 
-        traces_l23e, traces_l5e = [], []
+        traces_l4e, traces_l23e, traces_l5e, traces_l6e = [], [], [], []
         for t in range(seq_len):
             _, state = self.model.step(x[:, t], state)
             col_state = state.column_states
             if "r_l23e" in col_state:
                 # [batch, n_cols, n_neurons] → mean over batch & cols → [n_neurons]
+                traces_l4e.append( col_state["r_l4e" ].mean(dim=(0, 1)).cpu().numpy())
                 traces_l23e.append(col_state["r_l23e"].mean(dim=(0, 1)).cpu().numpy())
                 traces_l5e.append( col_state["r_l5e" ].mean(dim=(0, 1)).cpu().numpy())
+                traces_l6e.append( col_state["r_l6e" ].mean(dim=(0, 1)).cpu().numpy())
 
         self.model.train()
         if not traces_l23e:
             return {}
 
         # Stack to [T, n_neurons]
+        arr_l4e  = np.stack(traces_l4e)    # [T, n_l4e]
         arr_l23e = np.stack(traces_l23e)   # [T, n_l23e]
         arr_l5e  = np.stack(traces_l5e)    # [T, n_l5e]
+        arr_l6e  = np.stack(traces_l6e)    # [T, n_l6e]
 
         stats = {}
-        for key, arr in [("tau/l23e", arr_l23e), ("tau/l5e", arr_l5e)]:
+        for key, arr in [
+            ("tau/l4e",  arr_l4e),
+            ("tau/l23e", arr_l23e),
+            ("tau/l5e",  arr_l5e),
+            ("tau/l6e",  arr_l6e),
+        ]:
             taus = compute_effective_timescales(
                 torch.from_numpy(arr), max_lag=min(50, seq_len // 4)
             )
