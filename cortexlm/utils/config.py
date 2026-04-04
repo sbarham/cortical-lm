@@ -107,6 +107,7 @@ DEFAULT_CONFIG = {
         "reset_state_between_batches": False,
         "eprop_tau_e": None,           # null = use mean tau_m
         "hybrid_freeze_xi": False,     # freeze Xi during BPTT consolidation steps
+        "sgdr_restart_tokens": None,   # if set, use SGDR with T0 = this many tokens
     },
 
     "training": {

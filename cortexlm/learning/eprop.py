@@ -34,7 +34,7 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 
 from cortexlm.model import CortexLM, ModelState
-from cortexlm.utils.metrics import compute_perplexity
+from cortexlm.utils.metrics import compute_perplexity, compute_effective_timescales
 
 
 # ── Eligibility trace buffer ──────────────────────────────────────────────────
@@ -238,6 +238,68 @@ class _EpropBase:
     ) -> Tuple[float, ModelState]:
         raise NotImplementedError
 
+    # ── Diagnostics ──────────────────────────────────────────────────────────
+
+    @torch.no_grad()
+    def _collect_hopfield_stats(self) -> dict:
+        hpc = getattr(self.model, "hippocampus", None)
+        if hpc is None:
+            return {}
+        weights = getattr(hpc, "_last_attn_weights", None)
+        if weights is None:
+            return {}
+        eps = 1e-10
+        entropy = -(weights * (weights + eps).log()).sum(dim=-1).mean().item()
+        attn_max = weights.max(dim=-1).values.mean().item()
+        stats = {"hpc/attn_entropy": entropy, "hpc/attn_max": attn_max}
+        surprise = getattr(self.model, "_last_hpc_surprise", None)
+        if surprise is not None:
+            stats["hpc/ca1_surprise"] = surprise
+        return stats
+
+    @torch.no_grad()
+    def _collect_tau_stats(self, val_loader) -> dict:
+        import numpy as np
+        self.model.eval()
+        try:
+            x, _ = next(iter(val_loader))
+        except StopIteration:
+            return {}
+        x = x[:4].to(self.device)
+        batch, seq_len = x.shape
+        state = self.model.init_state(batch)
+
+        traces_l4e, traces_l23e, traces_l5e, traces_l6e = [], [], [], []
+        for t in range(seq_len):
+            _, state = self.model.step(x[:, t], state)
+            cs = state.column_states
+            if "r_l23e" in cs:
+                traces_l4e.append( cs["r_l4e" ].mean(dim=(0, 1)).cpu().numpy())
+                traces_l23e.append(cs["r_l23e"].mean(dim=(0, 1)).cpu().numpy())
+                traces_l5e.append( cs["r_l5e" ].mean(dim=(0, 1)).cpu().numpy())
+                traces_l6e.append( cs["r_l6e" ].mean(dim=(0, 1)).cpu().numpy())
+
+        self.model.train()
+        if not traces_l23e:
+            return {}
+
+        arr_l4e  = np.stack(traces_l4e)
+        arr_l23e = np.stack(traces_l23e)
+        arr_l5e  = np.stack(traces_l5e)
+        arr_l6e  = np.stack(traces_l6e)
+
+        stats = {}
+        for key, arr in [("tau/l4e", arr_l4e), ("tau/l23e", arr_l23e),
+                         ("tau/l5e", arr_l5e),  ("tau/l6e",  arr_l6e)]:
+            taus = compute_effective_timescales(
+                torch.from_numpy(arr), max_lag=min(50, seq_len // 4)
+            )
+            stats[f"{key}_mean"] = float(np.mean(taus))
+            stats[f"{key}_std"]  = float(np.std(taus))
+            stats[f"{key}_p25"]  = float(np.percentile(taus, 25))
+            stats[f"{key}_p75"]  = float(np.percentile(taus, 75))
+        return stats
+
     # ── Evaluation ───────────────────────────────────────────────────────────
 
     @torch.no_grad()
@@ -279,6 +341,20 @@ class _EpropBase:
             log_interval  = eval_interval
         ckpt_interval = tcfg.get("checkpoint_interval", max_steps)
 
+        # SGDR setup: restarts every sgdr_restart_tokens tokens
+        _sgdr_restart_tokens = self.config["learning"].get("sgdr_restart_tokens", None)
+        _sgdr_t0_steps = None
+        if _sgdr_restart_tokens is not None:
+            _sgdr_t0_steps = max(1, _sgdr_restart_tokens // tokens_per_step)
+
+        # HPC beta annealing setup
+        _hpc = getattr(self.model, "hippocampus", None)
+        _hpc_beta_anneal = (
+            _hpc is not None
+            and hasattr(_hpc, "update_beta")
+            and getattr(_hpc, "beta_init", None) is not None
+        )
+
         import os
         os.makedirs(ckpt_dir, exist_ok=True)
 
@@ -306,8 +382,22 @@ class _EpropBase:
 
             self._global_step = step
 
-            # Cosine LR annealing — update optimizers and direct-update LR
-            if self.cosine_decay:
+            # HPC beta annealing
+            if _hpc_beta_anneal:
+                _hpc.update_beta(step, max_steps)
+
+            # LR schedule: SGDR takes priority over cosine_decay
+            if _sgdr_t0_steps is not None:
+                cycle_pos = step % _sgdr_t0_steps
+                self._current_lr = self.lr * 0.5 * (
+                    1.0 + math.cos(math.pi * cycle_pos / _sgdr_t0_steps)
+                )
+                for opt in (self.readout_optimizer, self.embed_optimizer,
+                            getattr(self, "full_optimizer", None)):
+                    if opt is not None:
+                        for pg in opt.param_groups:
+                            pg["lr"] = self._current_lr
+            elif self.cosine_decay:
                 self._current_lr = self.lr * 0.5 * (1.0 + math.cos(math.pi * step / max_steps))
                 for opt in (self.readout_optimizer, self.embed_optimizer):
                     if opt is not None:
@@ -322,6 +412,7 @@ class _EpropBase:
                     "train/loss":       loss,
                     "train/perplexity": compute_perplexity(loss),
                     "tokens":           tokens_seen,
+                    "lr":               self._current_lr,
                 }
                 if self.param_traces:
                     with torch.no_grad():
@@ -330,15 +421,20 @@ class _EpropBase:
                     log_dict["eprop/trace_norm_mean"] = sum(trace_norms) / len(trace_norms)
                     log_dict["eprop/l_signal"]        = self._last_l_signal
                     log_dict["eprop/update_mag"]      = self._last_update_mag
+                if _hpc_beta_anneal:
+                    log_dict["hpc/beta"] = _hpc._beta_current
                 logger.log(log_dict, step=step)
 
             if step % eval_interval == 0:
                 val_loss = self.evaluate(val_loader)
+                aux_stats = self._collect_hopfield_stats()
+                aux_stats.update(self._collect_tau_stats(val_loader))
                 if logger:
                     logger.log({
                         "val/loss":       val_loss,
                         "val/perplexity": compute_perplexity(val_loss),
                         "tokens":         tokens_seen + 1,
+                        **aux_stats,
                     }, step=step)
 
             if step % ckpt_interval == 0 and step > 0:
