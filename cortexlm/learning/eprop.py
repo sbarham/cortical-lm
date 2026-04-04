@@ -589,8 +589,14 @@ class EpropHybridTrainer(_EpropBase):
         # Uses a separate LR so consolidation doesn't overwrite e-prop's incremental
         # updates.  Default: same as e-prop LR; override with hybrid_bptt_lr.
         bptt_lr = lcfg.get("hybrid_bptt_lr", self.lr)
+        self.freeze_xi = lcfg.get("hybrid_freeze_xi", False)
+        if self.freeze_xi and hasattr(self.model, "hippocampus") and hasattr(self.model.hippocampus, "Xi"):
+            _xi_id = id(self.model.hippocampus.Xi)
+            _bptt_params = [p for p in self.model.parameters() if id(p) != _xi_id]
+        else:
+            _bptt_params = list(self.model.parameters())
         self.full_optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=bptt_lr,
+            _bptt_params, lr=bptt_lr,
             weight_decay=config["training"].get("weight_decay", 1e-4),
         )
 

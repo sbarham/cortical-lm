@@ -106,6 +106,7 @@ DEFAULT_CONFIG = {
         "truncated_bptt_k": None,
         "reset_state_between_batches": False,
         "eprop_tau_e": None,           # null = use mean tau_m
+        "hybrid_freeze_xi": False,     # freeze Xi during BPTT consolidation steps
     },
 
     "training": {
