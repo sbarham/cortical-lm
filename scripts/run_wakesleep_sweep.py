@@ -28,7 +28,7 @@ short    v1        v2         v3
 mid      v4        v5         v6    ← v4 replicates winning ratio from prior sweep
 long     v7        v8         v9
 
-Diagnostic: hpc/attn_max at step 100
+Diagnostic (early stopping check): hpc/attn_max at step 100
     > 0.003 and stable  → HPC active
     back to 0.0014      → HPC collapsed
 
@@ -45,6 +45,7 @@ python scripts/run_wakesleep_sweep.py --runs all --dry-run
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -117,7 +118,7 @@ def build_command(variant_id: str, args: argparse.Namespace) -> list[str]:
     return cmd
 
 
-def run_variant(variant_id: str, cmd: list[str], dry_run: bool) -> bool:
+def run_variant(variant_id: str, cmd: list[str], dry_run: bool, args: argparse.Namespace) -> bool:
     vid, label, eprop_steps, bptt_steps, sgdr_tokens = VARIANTS[variant_id]
     sgdr_str = f"{sgdr_tokens // 1_000_000}M" if sgdr_tokens else "none"
     print(f"\n{'='*72}")
@@ -132,8 +133,12 @@ def run_variant(variant_id: str, cmd: list[str], dry_run: bool) -> bool:
         print("  (dry run — skipping)")
         return True
 
+    env = os.environ.copy()
+    if args.wandb_offline:
+        env["WANDB_MODE"] = "offline"
+
     t0 = time.time()
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, env=env)
     elapsed = time.time() - t0
 
     if result.returncode != 0:
@@ -152,9 +157,11 @@ def main():
     )
     parser.add_argument("--runs", nargs="+", default=["v4", "v5", "v6"],
                         help=f"Variant IDs to run, or 'all'. Choices: {all_ids}")
-    parser.add_argument("--max-tokens", type=int, default=25_000_000,
-                        help="Token budget per variant (default: 25M diagnostic)")
+    parser.add_argument("--max-tokens", type=int, default=100_000_000,
+                        help="Token budget per variant (default: 100M)")
     parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--wandb-offline", action="store_true",
+                        help="Set WANDB_MODE=offline (log locally, sync later)")
     parser.add_argument("--wandb-project", default="cortex-lm")
     parser.add_argument("--wandb-group", default=f"wakesleep-{time.strftime('%Y-%m-%d')}")
     parser.add_argument("--stop-on-failure", action="store_true")
@@ -175,7 +182,7 @@ def main():
     passed, failed = [], []
     for vid in args.runs:
         cmd = build_command(vid, args)
-        ok  = run_variant(vid, cmd, args.dry_run)
+        ok  = run_variant(vid, cmd, args.dry_run, args)
         (passed if ok else failed).append(vid)
         if not ok and args.stop_on_failure:
             break
