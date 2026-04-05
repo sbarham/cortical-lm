@@ -145,6 +145,8 @@ class _EpropBase:
         self.dale_interval     = config["learning"].get("dale_interval", 1)
         self._dale_t           = 0   # inner-timestep counter
 
+        self.eprop_mode = config["learning"].get("eprop_mode", "sequential")
+
         self._setup_traces()
         self._global_step = 0   # used by hybrid trainer for cycle tracking
 
@@ -232,6 +234,31 @@ class _EpropBase:
             if r_pre is None or v_post is None:
                 continue
             buf.update(r_pre.detach(), self._psi(v_post.detach()))
+
+    def _collect_forward_activations(
+        self, x: torch.Tensor, state: Optional[ModelState]
+    ) -> Tuple[list, list, "ModelState"]:
+        """
+        Run the full sequence forward with no_grad, collecting per-timestep states
+        and readout inputs.  Eliminates per-token CUDA kernel launch overhead from
+        the training loop.
+
+        Returns:
+            states    — list of T ModelStates (one per timestep)
+            ri_list   — list of T [B, rdim] readout-input tensors (detached clones)
+            state     — final ModelState (for carrying across batches)
+        """
+        T = x.shape[1]
+        states, ri_list = [], []
+        with torch.no_grad():
+            for t in range(T):
+                state = state.detach()
+                _, new_state = self.model.step(x[:, t], state)
+                states.append(new_state)
+                # clone: _last_readout_input is overwritten each step
+                ri_list.append(self.model._last_readout_input.detach().clone())
+                state = new_state
+        return states, ri_list, state
 
     def train_step(
         self, x: torch.Tensor, y: torch.Tensor, state: Optional[ModelState]
@@ -358,6 +385,25 @@ class _EpropBase:
         import os
         os.makedirs(ckpt_dir, exist_ok=True)
 
+        # Profiling: if profile_steps > 0, trace the first N steps and save to disk
+        profile_steps = tcfg.get("profile_steps", 0)
+        _prof = None
+        if profile_steps > 0:
+            prof_dir = os.path.join(ckpt_dir, "profile")
+            os.makedirs(prof_dir, exist_ok=True)
+            _prof = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                schedule=torch.profiler.schedule(wait=1, warmup=1, active=profile_steps),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(prof_dir),
+                record_shapes=True,
+                with_stack=False,
+            )
+            _prof.start()
+            print(f"  profiling {profile_steps} steps → {prof_dir}")
+
         state       = None
         step        = 0
         tokens_seen = 0
@@ -406,6 +452,13 @@ class _EpropBase:
 
             loss, state = self.train_step(x, y, state)
             tokens_seen += x.shape[0] * seq_len
+
+            if _prof is not None:
+                _prof.step()
+                if step >= profile_steps + 1:   # wait=1 warmup=1 active=N → done at 2+N
+                    _prof.stop()
+                    _prof = None
+                    print(f"  profiling complete — view with: tensorboard --logdir {prof_dir}")
 
             if logger and step % log_interval == 0:
                 log_dict = {
@@ -461,9 +514,14 @@ class EpropApproxTrainer(_EpropBase):
 
     def train_step(self, x, y, state):
         x, y = x.to(self.device), y.to(self.device)
-        batch, seq_len = x.shape
         if state is None:
-            state = self.model.init_state(batch)
+            state = self.model.init_state(x.shape[0])
+        if self.eprop_mode == "vectorized":
+            return self._train_step_vectorized(x, y, state)
+        return self._train_step_sequential(x, y, state)
+
+    def _train_step_sequential(self, x, y, state):
+        batch, seq_len = x.shape
         total_loss = 0.0
         l_acc, update_acc, update_n = 0.0, 0.0, 0
 
@@ -509,6 +567,51 @@ class EpropApproxTrainer(_EpropBase):
         self._last_update_mag = update_acc / max(update_n, 1)
         return total_loss / seq_len, state
 
+    def _train_step_vectorized(self, x, y, state):
+        B, T = x.shape
+
+        # Phase 1: full forward pass — one Python loop but no readout/backward inside
+        states, ri_list, state = self._collect_forward_activations(x, state)
+
+        # Phase 2: single readout forward+backward over all B×T tokens
+        # Stack as [B, T, rdim] so ri_flat[b*T+t] aligns with y.reshape(-1)[b*T+t]
+        ri_flat = torch.stack(ri_list, dim=1).reshape(B * T, -1).requires_grad_(True)
+        logits  = self.model.readout(ri_flat)
+        loss    = F.cross_entropy(logits, y.reshape(-1))
+        loss.backward()
+
+        L_scalar = ri_flat.grad.abs().mean().item()
+        l_acc    = L_scalar
+
+        nn.utils.clip_grad_norm_(self.model.readout.parameters(), self.grad_clip)
+        if not self.freeze_readout:
+            self.readout_optimizer.step(); self.readout_optimizer.zero_grad()
+            if self.embed_optimizer:
+                self.embed_optimizer.step(); self.embed_optimizer.zero_grad()
+        else:
+            self.readout_optimizer.zero_grad()
+            if self.embed_optimizer:
+                self.embed_optimizer.zero_grad()
+
+        # Phase 3: sequential trace accumulation over pre-collected states
+        # No CUDA kernel launches here — just cheap tensor indexing
+        update_acc, update_n = 0.0, 0
+        _L = 1.0 if self.normalize_l_signal else L_scalar
+        if not self.freeze_recurrent:
+            for t in range(T):
+                self._update_traces(states[t])
+                with torch.no_grad():
+                    for param, buf, _, _ in self.param_traces:
+                        g = (_L * buf.grad).clamp(-self.grad_clip, self.grad_clip)
+                        self._apply_recurrent_update(param, g)
+                        update_acc += g.abs().mean().item()
+                        update_n   += 1
+                self._maybe_enforce_dale()
+
+        self._last_l_signal   = l_acc
+        self._last_update_mag = update_acc / max(update_n, 1)
+        return loss.item(), state
+
 
 # ── Proper e-prop ─────────────────────────────────────────────────────────────
 
@@ -529,9 +632,14 @@ class EpropTrainer(_EpropBase):
 
     def train_step(self, x, y, state):
         x, y = x.to(self.device), y.to(self.device)
-        batch, seq_len = x.shape
         if state is None:
-            state = self.model.init_state(batch)
+            state = self.model.init_state(x.shape[0])
+        if self.eprop_mode == "vectorized":
+            return self._train_step_vectorized(x, y, state)
+        return self._train_step_sequential(x, y, state)
+
+    def _train_step_sequential(self, x, y, state):
+        batch, seq_len = x.shape
         total_loss = 0.0
         l_acc, update_acc, update_n = 0.0, 0.0, 0
 
@@ -548,8 +656,8 @@ class EpropTrainer(_EpropBase):
             total_loss += loss.item()
 
             # L_j(t): mean over batch → [readout_dim]
-            L_vec = ri.grad.detach().mean(dim=0)   # [readout_dim]
-            l_acc += ri.grad.detach().abs().mean().item()  # log pre-average magnitude
+            L_vec = ri.grad.detach().mean(dim=0)
+            l_acc += ri.grad.detach().abs().mean().item()
             if self.normalize_l_signal:
                 L_vec = L_vec / (L_vec.abs().mean() + 1e-8)
 
@@ -566,28 +674,22 @@ class EpropTrainer(_EpropBase):
             if not self.freeze_recurrent:
                 self._update_traces(new_state)
                 with torch.no_grad():
-                    # For L5E post-synaptic neurons, use the per-neuron vector learning
-                    # signal L_j = ∂loss/∂z_j reshaped to [n_cols, n_l5e].
-                    # For all other post populations, fall back to scalar approximation.
                     n_l5e  = getattr(self.model, "n_l5e", None)
                     n_cols = getattr(self.model, "n_columns", 1)
                     L_mat  = None
                     if n_l5e is not None and n_cols > 1:
                         try:
-                            L_mat = L_vec.reshape(n_cols, n_l5e)   # [n_cols, n_l5e]
+                            L_mat = L_vec.reshape(n_cols, n_l5e)
                         except RuntimeError:
                             pass
 
                     for param, buf, _, post_v_key in self.param_traces:
-                        trace = buf.grad  # [n_post, n_pre] or [n_cols, n_post, n_pre]
+                        trace = buf.grad
                         if L_mat is not None and post_v_key == "l5_e_v" and buf.n_cols > 1:
-                            # Per-column, per-neuron credit: [n_cols, n_l5e, n_pre]
                             g = torch.einsum("cn,cnp->cnp", L_mat, trace)
                         elif trace.dim() == 3:
-                            # Batched non-L5E post: scalar approximation per column
                             g = L_vec.abs().mean() * trace
                         else:
-                            # Non-batched fallback (original behaviour)
                             n_post = trace.shape[0]
                             L_post = L_vec[:n_post] if n_post <= L_vec.shape[0] else L_vec
                             g = L_post.unsqueeze(1) * trace
@@ -602,6 +704,71 @@ class EpropTrainer(_EpropBase):
         self._last_l_signal   = l_acc / seq_len
         self._last_update_mag = update_acc / max(update_n, 1)
         return total_loss / seq_len, state
+
+    def _train_step_vectorized(self, x, y, state):
+        B, T = x.shape
+
+        # Phase 1: full forward pass — one Python loop, no readout/backward inside
+        states, ri_list, state = self._collect_forward_activations(x, state)
+
+        # Phase 2: single readout forward+backward over all B×T tokens
+        # Stack as [B, T, rdim] → [B*T, rdim] so indices align with y.reshape(-1)
+        ri_flat = torch.stack(ri_list, dim=1).reshape(B * T, -1).requires_grad_(True)
+        logits  = self.model.readout(ri_flat)
+        loss    = F.cross_entropy(logits, y.reshape(-1))
+        loss.backward()
+
+        # Per-timestep L_j: grad shape [B*T, rdim] → [B, T, rdim] → mean over B → [T, rdim]
+        L_grads = ri_flat.grad.reshape(B, T, -1)
+        l_acc   = L_grads.abs().mean().item()
+
+        nn.utils.clip_grad_norm_(self.model.readout.parameters(), self.grad_clip)
+        if not self.freeze_readout:
+            self.readout_optimizer.step(); self.readout_optimizer.zero_grad()
+            if self.embed_optimizer:
+                self.embed_optimizer.step(); self.embed_optimizer.zero_grad()
+        else:
+            self.readout_optimizer.zero_grad()
+            if self.embed_optimizer:
+                self.embed_optimizer.zero_grad()
+
+        # Phase 3: sequential trace accumulation over pre-collected states
+        # No CUDA kernel launches — just cheap tensor indexing into pre-collected activations
+        update_acc, update_n = 0.0, 0
+        n_l5e  = getattr(self.model, "n_l5e", None)
+        n_cols = getattr(self.model, "n_columns", 1)
+        if not self.freeze_recurrent:
+            for t in range(T):
+                self._update_traces(states[t])
+                L_vec = L_grads[:, t, :].mean(dim=0)   # [rdim]
+                if self.normalize_l_signal:
+                    L_vec = L_vec / (L_vec.abs().mean() + 1e-8)
+                L_mat = None
+                if n_l5e is not None and n_cols > 1:
+                    try:
+                        L_mat = L_vec.reshape(n_cols, n_l5e)
+                    except RuntimeError:
+                        pass
+                with torch.no_grad():
+                    for param, buf, _, post_v_key in self.param_traces:
+                        trace = buf.grad
+                        if L_mat is not None and post_v_key == "l5_e_v" and buf.n_cols > 1:
+                            g = torch.einsum("cn,cnp->cnp", L_mat, trace)
+                        elif trace.dim() == 3:
+                            g = L_vec.abs().mean() * trace
+                        else:
+                            n_post = trace.shape[0]
+                            L_post = L_vec[:n_post] if n_post <= L_vec.shape[0] else L_vec
+                            g = L_post.unsqueeze(1) * trace
+                        g = g.clamp(-self.grad_clip, self.grad_clip)
+                        self._apply_recurrent_update(param, g)
+                        update_acc += g.abs().mean().item()
+                        update_n   += 1
+                self._maybe_enforce_dale()
+
+        self._last_l_signal   = l_acc
+        self._last_update_mag = update_acc / max(update_n, 1)
+        return loss.item(), state
 
 
 # ── Hybrid e-prop / BPTT ──────────────────────────────────────────────────────

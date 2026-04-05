@@ -86,6 +86,7 @@ def build_command(variant_id: str, args: argparse.Namespace) -> list[str]:
 
     overrides = [
         f"learning.rule=eprop_hybrid",
+        f"learning.eprop_mode=vectorized",
         f"learning.reset_state_between_batches=true",
         f"learning.hybrid_eprop_steps={eprop_steps}",
         f"learning.hybrid_bptt_steps={bptt_steps}",

@@ -108,6 +108,8 @@ DEFAULT_CONFIG = {
         "eprop_tau_e": None,           # null = use mean tau_m
         "hybrid_freeze_xi": False,     # freeze Xi during BPTT consolidation steps
         "sgdr_restart_tokens": None,   # if set, use SGDR with T0 = this many tokens
+        "eprop_mode": "sequential",    # sequential | vectorized
+
     },
 
     "training": {
@@ -126,6 +128,7 @@ DEFAULT_CONFIG = {
         "bf16": True,                # bfloat16 autocast on CUDA (no GradScaler needed)
         "grad_accum_steps": 1,       # gradient accumulation before optimizer.step()
         "compile": False,            # torch.compile(model) — BPTT only, incompatible with e-prop hooks
+        "profile_steps": 0,          # if > 0, run torch.profiler for this many steps and save trace
     },
 
     "simulation": {
