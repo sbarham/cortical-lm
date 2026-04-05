@@ -53,8 +53,8 @@ import time
 SEQ_LEN          = 256
 BASE_CONFIG      = "configs/scale_5m_run5_combined.yaml"
 TOKENIZER        = "tokenizers/wikitext103_bpe16k.pkl"
-EPROP_BATCH      = 16
-BPTT_BATCH       = 128
+DEFAULT_EPROP_BATCH = 16
+BPTT_BATCH          = 128
 SGDR_TOKENS_12M  = 12_500_000   # restart every 12.5M tokens (8 restarts over 100M)
 SGDR_TOKENS_25M  = 25_000_000   # restart every 25M tokens  (4 restarts over 100M)
 
@@ -77,10 +77,12 @@ VARIANTS = {v[0]: v for v in _VARIANTS}
 
 def build_command(variant_id: str, args: argparse.Namespace) -> list[str]:
     vid, label, eprop_steps, bptt_steps, sgdr_tokens = VARIANTS[variant_id]
+    eprop_batch  = args.eprop_batch
 
-    max_steps    = args.max_tokens // (EPROP_BATCH * SEQ_LEN)
+    max_steps    = args.max_tokens // (eprop_batch * SEQ_LEN)
     sgdr_suffix  = f"-sgdr{sgdr_tokens // 1_000_000}m" if sgdr_tokens else ""
-    run_name     = f"ws-{vid}-e{eprop_steps}-b{bptt_steps}{sgdr_suffix}"
+    batch_suffix = f"-eb{eprop_batch}" if eprop_batch != DEFAULT_EPROP_BATCH else ""
+    run_name     = f"ws-{vid}-e{eprop_steps}-b{bptt_steps}{sgdr_suffix}{batch_suffix}"
     ckpt_dir     = f"checkpoints/{run_name}"
     warmup_steps = max(1, max_steps // 20)   # 5% warmup
 
@@ -93,7 +95,7 @@ def build_command(variant_id: str, args: argparse.Namespace) -> list[str]:
         f"learning.hybrid_bptt_batch_size={BPTT_BATCH}",
         f"learning.hybrid_bptt_scope=full",
         f"learning.hybrid_freeze_xi=false",
-        f"training.batch_size={EPROP_BATCH}",
+        f"training.batch_size={eprop_batch}",
         f"training.max_steps={max_steps}",
         f"training.max_tokens={args.max_tokens}",
         f"training.warmup_steps={warmup_steps}",
@@ -125,7 +127,7 @@ def run_variant(variant_id: str, cmd: list[str], dry_run: bool, args: argparse.N
     print(f"\n{'='*72}")
     print(f"  [{vid}]  {label}")
     print(f"  eprop={eprop_steps}  bptt={bptt_steps}  "
-          f"eprop_batch={EPROP_BATCH}  bptt_batch={BPTT_BATCH}  "
+          f"eprop_batch={args.eprop_batch}  bptt_batch={BPTT_BATCH}  "
           f"sgdr={sgdr_str}")
     print(f"  {' '.join(cmd)}")
     print(f"{'='*72}")
@@ -160,6 +162,8 @@ def main():
                         help=f"Variant IDs to run, or 'all'. Choices: {all_ids}")
     parser.add_argument("--max-tokens", type=int, default=100_000_000,
                         help="Token budget per variant (default: 100M)")
+    parser.add_argument("--eprop-batch", type=int, default=DEFAULT_EPROP_BATCH,
+                        help=f"E-prop batch size (default: {DEFAULT_EPROP_BATCH})")
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb-offline", action="store_true",
                         help="Set WANDB_MODE=offline (log locally, sync later)")
