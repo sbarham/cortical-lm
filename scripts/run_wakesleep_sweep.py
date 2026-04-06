@@ -58,37 +58,56 @@ BPTT_BATCH          = 128
 SGDR_TOKENS_12M  = 12_500_000   # restart every 12.5M tokens (8 restarts over 100M)
 SGDR_TOKENS_25M  = 25_000_000   # restart every 25M tokens  (4 restarts over 100M)
 
-# (id, label, eprop_steps, bptt_steps, sgdr_tokens)
+# (id, label, eprop_steps, bptt_steps, sgdr_tokens, phase_schedule, max_tokens_override, eprop_mode)
 # sgdr_tokens=None → flat cosine decay
+# phase_schedule=None → fixed ratio; list of (eprop, bptt) pairs → anneal at each SGDR restart
+# max_tokens_override=None → use --max-tokens arg (default 100M)
+# eprop_mode → "vectorized" | "sequential"
 _VARIANTS = [
-    ("v1", "short  flat   (20:10, no SGDR)",          20,  10, None),
-    ("v2", "short  sgdr12 (20:10, SGDR 12.5M)",       20,  10, SGDR_TOKENS_12M),
-    ("v3", "short  sgdr25 (20:10, SGDR 25M)",         20,  10, SGDR_TOKENS_25M),
-    ("v4", "mid    flat   (50:25, no SGDR)",           50,  25, None),
-    ("v5", "mid    sgdr12 (50:25, SGDR 12.5M)",        50,  25, SGDR_TOKENS_12M),
-    ("v6", "mid    sgdr25 (50:25, SGDR 25M)",          50,  25, SGDR_TOKENS_25M),
-    ("v7", "long   flat   (100:50, no SGDR)",         100,  50, None),
-    ("v8", "long   sgdr12 (100:50, SGDR 12.5M)",      100,  50, SGDR_TOKENS_12M),
-    ("v9", "long   sgdr25 (100:50, SGDR 25M)",        100,  50, SGDR_TOKENS_25M),
+    ("v1", "short  flat   (20:10, no SGDR)",          20,  10, None,            None, None, "vectorized"),
+    ("v2", "short  sgdr12 (20:10, SGDR 12.5M)",       20,  10, SGDR_TOKENS_12M, None, None, "vectorized"),
+    ("v3", "short  sgdr25 (20:10, SGDR 25M)",         20,  10, SGDR_TOKENS_25M, None, None, "vectorized"),
+    ("v4", "mid    flat   (50:25, no SGDR)",           50,  25, None,            None, None, "vectorized"),
+    ("v5", "mid    sgdr12 (50:25, SGDR 12.5M)",        50,  25, SGDR_TOKENS_12M, None, None, "vectorized"),
+    ("v6", "mid    sgdr25 (50:25, SGDR 25M)",          50,  25, SGDR_TOKENS_25M, None, None, "vectorized"),
+    ("v7", "long   flat   (100:50, no SGDR)",         100,  50, None,            None, None, "vectorized"),
+    ("v8", "long   sgdr12 (100:50, SGDR 12.5M)",      100,  50, SGDR_TOKENS_12M, None, None, "vectorized"),
+    ("v9", "long   sgdr25 (100:50, SGDR 25M)",        100,  50, SGDR_TOKENS_25M, None, None, "vectorized"),
+    # ── Annealing schedules: e-prop ratio decays to 0 at SGDR restart points ──
+    # va: fast anneal (20:10-based, cycle=30). Phases: 20:10 → 10:20 → 0:30
+    ("va", "anneal fast  (20:10→10:20→0:30, SGDR 25M)",
+     20, 10, SGDR_TOKENS_25M, [(20, 10), (10, 20), (0, 30)], None, "vectorized"),
+    # vb: slow anneal (50:25-based, cycle=75). Phases: 50:25 → 25:50 → 5:70 → 0:75
+    ("vb", "anneal slow  (50:25→25:50→5:70→0:75, SGDR 25M)",
+     50, 25, SGDR_TOKENS_25M, [(50, 25), (25, 50), (5, 70), (0, 75)], None, "vectorized"),
+    # vc: 5-phase gradual anneal, vectorized e-prop (cycle=30, SGDR 12.5M, 100M)
+    #     0–12.5M: 20:10  12.5–25M: 10:20  25–37.5M: 5:25  37.5–50M: 2:28  50M+: 0:30
+    ("vc", "anneal 5-phase vectorized (20:10→10:20→5:25→2:28→0:30, SGDR 12.5M)",
+     20, 10, SGDR_TOKENS_12M, [(20, 10), (10, 20), (5, 25), (2, 28), (0, 30)], None, "vectorized"),
+    # vd: identical to vc but sequential e-prop — speed/learning comparison
+    ("vd", "anneal 5-phase sequential (20:10→10:20→5:25→2:28→0:30, SGDR 12.5M)",
+     20, 10, SGDR_TOKENS_12M, [(20, 10), (10, 20), (5, 25), (2, 28), (0, 30)], None, "sequential"),
 ]
 
 VARIANTS = {v[0]: v for v in _VARIANTS}
 
 
 def build_command(variant_id: str, args: argparse.Namespace) -> list[str]:
-    vid, label, eprop_steps, bptt_steps, sgdr_tokens = VARIANTS[variant_id]
+    vid, label, eprop_steps, bptt_steps, sgdr_tokens, phase_schedule, max_tokens_override, eprop_mode = VARIANTS[variant_id]
     eprop_batch  = args.eprop_batch
+    max_tokens   = max_tokens_override if max_tokens_override is not None else args.max_tokens
 
-    max_steps    = args.max_tokens // (eprop_batch * SEQ_LEN)
+    max_steps    = max_tokens // (eprop_batch * SEQ_LEN)
     sgdr_suffix  = f"-sgdr{sgdr_tokens // 1_000_000}m" if sgdr_tokens else ""
     batch_suffix = f"-eb{eprop_batch}" if eprop_batch != DEFAULT_EPROP_BATCH else ""
-    run_name     = f"ws-{vid}-e{eprop_steps}-b{bptt_steps}{sgdr_suffix}{batch_suffix}"
+    mode_suffix  = "-seq" if eprop_mode == "sequential" else ""
+    run_name     = f"ws-{vid}-e{eprop_steps}-b{bptt_steps}{sgdr_suffix}{batch_suffix}{mode_suffix}"
     ckpt_dir     = f"checkpoints/{run_name}"
     warmup_steps = max(1, max_steps // 20)   # 5% warmup
 
     overrides = [
         f"learning.rule=eprop_hybrid",
-        f"learning.eprop_mode=vectorized",
+        f"learning.eprop_mode={eprop_mode}",
         f"learning.reset_state_between_batches=true",
         f"learning.hybrid_eprop_steps={eprop_steps}",
         f"learning.hybrid_bptt_steps={bptt_steps}",
@@ -97,7 +116,7 @@ def build_command(variant_id: str, args: argparse.Namespace) -> list[str]:
         f"learning.hybrid_freeze_xi=false",
         f"training.batch_size={eprop_batch}",
         f"training.max_steps={max_steps}",
-        f"training.max_tokens={args.max_tokens}",
+        f"training.max_tokens={max_tokens}",
         f"training.warmup_steps={warmup_steps}",
         f"training.log_tokens=100000",
         f"training.eval_tokens=500000",
@@ -107,6 +126,11 @@ def build_command(variant_id: str, args: argparse.Namespace) -> list[str]:
     ]
     if sgdr_tokens:
         overrides.append(f"learning.sgdr_restart_tokens={sgdr_tokens}")
+    if phase_schedule is not None:
+        e_sched = str([e for e, b in phase_schedule]).replace(" ", "")
+        b_sched = str([b for e, b in phase_schedule]).replace(" ", "")
+        overrides.append(f"learning.hybrid_eprop_steps_schedule={e_sched}")
+        overrides.append(f"learning.hybrid_bptt_steps_schedule={b_sched}")
     if args.wandb:
         overrides += [
             f"logging.wandb=true",
@@ -122,13 +146,15 @@ def build_command(variant_id: str, args: argparse.Namespace) -> list[str]:
 
 
 def run_variant(variant_id: str, cmd: list[str], dry_run: bool, args: argparse.Namespace) -> bool:
-    vid, label, eprop_steps, bptt_steps, sgdr_tokens = VARIANTS[variant_id]
+    vid, label, eprop_steps, bptt_steps, sgdr_tokens, phase_schedule, max_tokens_override, eprop_mode = VARIANTS[variant_id]
+    max_tokens = max_tokens_override if max_tokens_override is not None else args.max_tokens
     sgdr_str = f"{sgdr_tokens // 1_000_000}M" if sgdr_tokens else "none"
     print(f"\n{'='*72}")
     print(f"  [{vid}]  {label}")
     print(f"  eprop={eprop_steps}  bptt={bptt_steps}  "
           f"eprop_batch={args.eprop_batch}  bptt_batch={BPTT_BATCH}  "
-          f"sgdr={sgdr_str}")
+          f"sgdr={sgdr_str}  max_tokens={max_tokens/1e6:.0f}M  eprop_mode={eprop_mode}"
+          + (f"\n  schedule={phase_schedule}" if phase_schedule else ""))
     print(f"  {' '.join(cmd)}")
     print(f"{'='*72}")
 

@@ -148,7 +148,9 @@ class _EpropBase:
         self.eprop_mode = config["learning"].get("eprop_mode", "sequential")
 
         self._setup_traces()
-        self._global_step = 0   # used by hybrid trainer for cycle tracking
+        self._global_step      = 0     # used by hybrid trainer for cycle tracking
+        self._current_sgdr_cycle = 0   # which SGDR restart cycle we're in (0-indexed)
+        self._sgdr_t0_steps    = None  # exposed so hybrid trainer can compute cycle idx
 
         # Diagnostic tracking — updated each train_step, logged at log_interval
         self._last_l_signal   = 0.0  # mean |learning signal| over last step's timesteps
@@ -404,6 +406,9 @@ class _EpropBase:
             _prof.start()
             print(f"  profiling {profile_steps} steps → {prof_dir}")
 
+        import time as _time
+        _t_start = _time.time()
+
         state       = None
         step        = 0
         tokens_seen = 0
@@ -434,6 +439,8 @@ class _EpropBase:
 
             # LR schedule: SGDR takes priority over cosine_decay
             if _sgdr_t0_steps is not None:
+                self._sgdr_t0_steps    = _sgdr_t0_steps
+                self._current_sgdr_cycle = step // _sgdr_t0_steps
                 cycle_pos = step % _sgdr_t0_steps
                 self._current_lr = self.lr * 0.5 * (
                     1.0 + math.cos(math.pi * cycle_pos / _sgdr_t0_steps)
@@ -466,6 +473,7 @@ class _EpropBase:
                     "train/perplexity": compute_perplexity(loss),
                     "tokens":           tokens_seen,
                     "lr":               self._current_lr,
+                    "elapsed_min":      (_time.time() - _t_start) / 60.0,
                 }
                 if self.param_traces:
                     with torch.no_grad():
@@ -580,7 +588,8 @@ class EpropApproxTrainer(_EpropBase):
         loss    = F.cross_entropy(logits, y.reshape(-1))
         loss.backward()
 
-        L_scalar = ri_flat.grad.abs().mean().item()
+        # Scale by T: cross_entropy averages over B*T here vs B in sequential path
+        L_scalar = ri_flat.grad.abs().mean().item() * T
         l_acc    = L_scalar
 
         nn.utils.clip_grad_norm_(self.model.readout.parameters(), self.grad_clip)
@@ -719,7 +728,8 @@ class EpropTrainer(_EpropBase):
         loss.backward()
 
         # Per-timestep L_j: grad shape [B*T, rdim] → [B, T, rdim] → mean over B → [T, rdim]
-        L_grads = ri_flat.grad.reshape(B, T, -1)
+        # Scale by T: cross_entropy averages over B*T here vs B in sequential path
+        L_grads = ri_flat.grad.reshape(B, T, -1) * T
         l_acc   = L_grads.abs().mean().item()
 
         nn.utils.clip_grad_norm_(self.model.readout.parameters(), self.grad_clip)
@@ -848,6 +858,16 @@ class EpropHybridTrainer(_EpropBase):
         # Share all state — don't re-init, just bind
         self._eprop.__dict__ = self.__dict__
 
+        # Phase annealing schedule: list of (eprop_steps, bptt_steps) per SGDR cycle.
+        # If set, overrides hybrid_eprop_steps/hybrid_bptt_steps after each SGDR restart.
+        _e_sched = lcfg.get("hybrid_eprop_steps_schedule", None)
+        _b_sched = lcfg.get("hybrid_bptt_steps_schedule", None)
+        if _e_sched is not None and _b_sched is not None:
+            self._phase_schedule = list(zip(_e_sched, _b_sched))
+        else:
+            self._phase_schedule = None
+        self._last_logged_phase = -1   # suppress duplicate phase-transition prints
+
         # Full-model optimizer for BPTT consolidation steps.
         # Uses a separate LR so consolidation doesn't overwrite e-prop's incremental
         # updates.  Default: same as e-prop LR; override with hybrid_bptt_lr.
@@ -868,7 +888,26 @@ class EpropHybridTrainer(_EpropBase):
         return self.eprop_steps + self.bptt_steps
 
     def _in_bptt_phase(self) -> bool:
+        # eprop_steps == 0 → pure BPTT (modulo always >= 0 == eprop_steps)
+        if self.eprop_steps == 0:
+            return True
         return (self._global_step % self._cycle_len) >= self.eprop_steps
+
+    def _update_phase_from_schedule(self):
+        """Switch eprop/bptt step counts when a new SGDR cycle begins."""
+        if self._phase_schedule is None or self._sgdr_t0_steps is None:
+            return
+        cycle_idx = min(self._current_sgdr_cycle, len(self._phase_schedule) - 1)
+        if cycle_idx == self._last_logged_phase:
+            return
+        new_eprop, new_bptt = self._phase_schedule[cycle_idx]
+        if new_eprop != self.eprop_steps or new_bptt != self.bptt_steps:
+            print(f"\n  [phase transition] SGDR cycle {cycle_idx}: "
+                  f"{self.eprop_steps}:{self.bptt_steps} → {new_eprop}:{new_bptt} "
+                  f"({'pure BPTT' if new_eprop == 0 else 'hybrid'})")
+        self.eprop_steps = new_eprop
+        self.bptt_steps  = new_bptt
+        self._last_logged_phase = cycle_idx
 
     def _update_plateau_detection(self, loss: float) -> bool:
         """
@@ -891,6 +930,7 @@ class EpropHybridTrainer(_EpropBase):
         return False
 
     def train_step(self, x, y, state):
+        self._update_phase_from_schedule()
         if self.adaptive:
             return self._adaptive_train_step(x, y, state)
         if self._in_bptt_phase():

@@ -109,6 +109,8 @@ DEFAULT_CONFIG = {
         "hybrid_freeze_xi": False,     # freeze Xi during BPTT consolidation steps
         "sgdr_restart_tokens": None,   # if set, use SGDR with T0 = this many tokens
         "eprop_mode": "sequential",    # sequential | vectorized
+        "hybrid_eprop_steps_schedule": None,  # list of eprop_steps per SGDR cycle, e.g. [20,10,0]
+        "hybrid_bptt_steps_schedule":  None,  # list of bptt_steps per SGDR cycle,  e.g. [10,20,30]
 
     },
 
