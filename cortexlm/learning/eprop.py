@@ -862,8 +862,14 @@ class EpropHybridTrainer(_EpropBase):
         # If set, overrides hybrid_eprop_steps/hybrid_bptt_steps after each SGDR restart.
         _e_sched = lcfg.get("hybrid_eprop_steps_schedule", None)
         _b_sched = lcfg.get("hybrid_bptt_steps_schedule", None)
+        # Override system may deliver these as strings (e.g. "[20,10,0]") — parse if needed
+        if isinstance(_e_sched, str):
+            import json; _e_sched = json.loads(_e_sched)
+        if isinstance(_b_sched, str):
+            import json; _b_sched = json.loads(_b_sched)
         if _e_sched is not None and _b_sched is not None:
-            self._phase_schedule = list(zip(_e_sched, _b_sched))
+            self._phase_schedule = list(zip([int(x) for x in _e_sched],
+                                            [int(x) for x in _b_sched]))
         else:
             self._phase_schedule = None
         self._last_logged_phase = -1   # suppress duplicate phase-transition prints
