@@ -46,6 +46,7 @@ python scripts/run_canonical_apical.py --dry-run
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -167,7 +168,7 @@ def build_command(exp: dict, args: argparse.Namespace) -> list[str]:
     return cmd
 
 
-def run_experiment(exp: dict, cmd: list[str], dry_run: bool) -> bool:
+def run_experiment(exp: dict, cmd: list[str], dry_run: bool, args: argparse.Namespace) -> bool:
     sep = "=" * 70
     print(f"\n{sep}")
     print(f"  [{exp['id']}]  {exp['label']}")
@@ -179,8 +180,12 @@ def run_experiment(exp: dict, cmd: list[str], dry_run: bool) -> bool:
         print("  (dry run -- skipping)")
         return True
 
+    env = os.environ.copy()
+    if args.wandb_offline:
+        env["WANDB_MODE"] = "offline"
+
     t0 = time.time()
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, env=env)
     elapsed = time.time() - t0
 
     if result.returncode != 0:
@@ -207,6 +212,8 @@ def main():
                             f"Choices: {EXP_IDS}.  Example: --runs 1i 1f 1d"
                         ))
     parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--wandb-offline", action="store_true",
+                        help="Set WANDB_MODE=offline (log locally, sync later).")
     parser.add_argument("--wandb-project", default="cortex-lm")
     parser.add_argument("--wandb-group",
                         default=f"canonical-apical-{time.strftime('%Y-%m-%d')}")
@@ -235,7 +242,7 @@ def main():
     failed = []
     for exp in selected:
         cmd = build_command(exp, args)
-        ok = run_experiment(exp, cmd, args.dry_run)
+        ok = run_experiment(exp, cmd, args.dry_run, args)
         if not ok:
             failed.append(exp["id"])
             if args.stop_on_failure:
