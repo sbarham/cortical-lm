@@ -145,8 +145,10 @@ def build_command(exp: dict, args: argparse.Namespace) -> list[str]:
         overrides.append(ov)
 
     cmd = [sys.executable, "scripts/train.py",
-           "--config", exp["config"],
-           "--override"] + overrides
+           "--config", exp["config"]]
+    if getattr(args, "resume", None):
+        cmd += ["--resume", args.resume]
+    cmd += ["--override"] + overrides
     return cmd
 
 
@@ -196,6 +198,8 @@ def main():
                         default=f"wakesleep-canonical-{time.strftime('%Y-%m-%d')}")
     parser.add_argument("--override", nargs="*", default=[],
                         help="Extra key=value overrides forwarded to every run.")
+    parser.add_argument("--resume", default=None,
+                        help="Path to checkpoint .pt file to resume from (single-phase runs only).")
     parser.add_argument("--stop-on-failure", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

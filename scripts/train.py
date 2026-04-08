@@ -249,7 +249,7 @@ def main():
           f"| batch={tcfg['batch_size']} | lr={tcfg['lr']} | seq_len={config['data']['seq_len']}")
     print()
 
-    trainer.train(train_loader, val_loader, logger=logger)
+    trainer.train(train_loader, val_loader, logger=logger, start_step=start_step)
 
     logger.finish()
     print("\nTraining complete.")

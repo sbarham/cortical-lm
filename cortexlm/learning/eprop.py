@@ -351,7 +351,7 @@ class _EpropBase:
 
     # ── Training loop ─────────────────────────────────────────────────────────
 
-    def train(self, train_loader, val_loader, logger=None):
+    def train(self, train_loader, val_loader, logger=None, start_step: int = 0):
         tcfg   = self.config["training"]
         lcfg   = self.config["logging"]
         max_steps  = tcfg.get("max_steps", 100_000)
@@ -410,13 +410,38 @@ class _EpropBase:
         _t_start = _time.time()
 
         state       = None
-        step        = 0
-        tokens_seen = 0
+        step        = start_step
+        tokens_seen = start_step * tokens_per_step
         train_iter  = iter(train_loader)
         # Expose iterator + loader so subclasses (e.g. hybrid BPTT phase) can pull
         # additional batches independently of the main e-prop loop.
         self._train_iter   = train_iter
         self._train_loader = train_loader
+
+        # Fast-forward data iterator past already-seen steps.
+        # Data order won't be identical (shuffler state is lost), but this ensures
+        # the model doesn't re-train on the same epoch-start data every resume.
+        if start_step > 0:
+            print(f"  resuming from step {start_step:,} ({tokens_seen:,} tokens seen) — "
+                  f"fast-forwarding data loader...")
+            for _skip in range(start_step):
+                try:
+                    next(train_iter)
+                except StopIteration:
+                    train_iter = iter(train_loader)
+                    self._train_iter = train_iter
+                    next(train_iter)
+            # Pre-initialize SGDR cycle and phase schedule so the first train_step
+            # sees the right ratio without waiting for the loop to reach that step.
+            if _sgdr_t0_steps is not None:
+                self._sgdr_t0_steps      = _sgdr_t0_steps
+                self._current_sgdr_cycle = start_step // _sgdr_t0_steps
+                if hasattr(self, "_update_phase_from_schedule"):
+                    self._update_phase_from_schedule()
+            print(f"  fast-forward complete"
+                  + (f" — SGDR cycle {self._current_sgdr_cycle}" if _sgdr_t0_steps else "")
+                  + (f", phase {self.eprop_steps}:{self.bptt_steps}"
+                     if hasattr(self, "eprop_steps") else ""))
 
         while step < max_steps:
             try:
