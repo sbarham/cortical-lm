@@ -59,36 +59,37 @@ SGDR_TOKENS_12M  = 12_500_000   # restart every 12.5M tokens (8 restarts over 10
 SGDR_TOKENS_20M  = 20_000_000   # restart every 20M tokens   (5 restarts over 100M)
 SGDR_TOKENS_25M  = 25_000_000   # restart every 25M tokens   (4 restarts over 100M)
 
-# (id, label, eprop_steps, bptt_steps, sgdr_tokens, phase_schedule, max_tokens_override, eprop_mode, extra_overrides)
+# (id, label, eprop_steps, bptt_steps, sgdr_tokens, phase_schedule, max_tokens_override, eprop_mode, extra_overrides, config_override)
 # sgdr_tokens=None → flat cosine decay
 # phase_schedule=None → fixed ratio; list of (eprop, bptt) pairs → anneal at each SGDR restart
 # max_tokens_override=None → use --max-tokens arg (default 100M)
 # eprop_mode → "vectorized" | "sequential"
 # extra_overrides → list of additional "key=value" strings appended to --override (or None)
+# config_override → path to a YAML config file, or None to use BASE_CONFIG
 _VARIANTS = [
-    ("v1", "short  flat   (20:10, no SGDR)",          20,  10, None,            None, None, "vectorized", None),
-    ("v2", "short  sgdr12 (20:10, SGDR 12.5M)",       20,  10, SGDR_TOKENS_12M, None, None, "vectorized", None),
-    ("v3", "short  sgdr25 (20:10, SGDR 25M)",         20,  10, SGDR_TOKENS_25M, None, None, "vectorized", None),
-    ("v4", "mid    flat   (50:25, no SGDR)",           50,  25, None,            None, None, "vectorized", None),
-    ("v5", "mid    sgdr12 (50:25, SGDR 12.5M)",        50,  25, SGDR_TOKENS_12M, None, None, "vectorized", None),
-    ("v6", "mid    sgdr25 (50:25, SGDR 25M)",          50,  25, SGDR_TOKENS_25M, None, None, "vectorized", None),
-    ("v7", "long   flat   (100:50, no SGDR)",         100,  50, None,            None, None, "vectorized", None),
-    ("v8", "long   sgdr12 (100:50, SGDR 12.5M)",      100,  50, SGDR_TOKENS_12M, None, None, "vectorized", None),
-    ("v9", "long   sgdr25 (100:50, SGDR 25M)",        100,  50, SGDR_TOKENS_25M, None, None, "vectorized", None),
+    ("v1", "short  flat   (20:10, no SGDR)",          20,  10, None,            None, None, "vectorized", None, None),
+    ("v2", "short  sgdr12 (20:10, SGDR 12.5M)",       20,  10, SGDR_TOKENS_12M, None, None, "vectorized", None, None),
+    ("v3", "short  sgdr25 (20:10, SGDR 25M)",         20,  10, SGDR_TOKENS_25M, None, None, "vectorized", None, None),
+    ("v4", "mid    flat   (50:25, no SGDR)",           50,  25, None,            None, None, "vectorized", None, None),
+    ("v5", "mid    sgdr12 (50:25, SGDR 12.5M)",        50,  25, SGDR_TOKENS_12M, None, None, "vectorized", None, None),
+    ("v6", "mid    sgdr25 (50:25, SGDR 25M)",          50,  25, SGDR_TOKENS_25M, None, None, "vectorized", None, None),
+    ("v7", "long   flat   (100:50, no SGDR)",         100,  50, None,            None, None, "vectorized", None, None),
+    ("v8", "long   sgdr12 (100:50, SGDR 12.5M)",      100,  50, SGDR_TOKENS_12M, None, None, "vectorized", None, None),
+    ("v9", "long   sgdr25 (100:50, SGDR 25M)",        100,  50, SGDR_TOKENS_25M, None, None, "vectorized", None, None),
     # ── Annealing schedules: e-prop ratio decays to 0 at SGDR restart points ──
     # va: fast anneal (20:10-based, cycle=30). Phases: 20:10 → 10:20 → 0:30
     ("va", "anneal fast  (20:10→10:20→0:30, SGDR 25M)",
-     20, 10, SGDR_TOKENS_25M, [(20, 10), (10, 20), (0, 30)], None, "vectorized", None),
+     20, 10, SGDR_TOKENS_25M, [(20, 10), (10, 20), (0, 30)], None, "vectorized", None, None),
     # vb: slow anneal (50:25-based, cycle=75). Phases: 50:25 → 25:50 → 5:70 → 0:75
     ("vb", "anneal slow  (50:25→25:50→5:70→0:75, SGDR 25M)",
-     50, 25, SGDR_TOKENS_25M, [(50, 25), (25, 50), (5, 70), (0, 75)], None, "vectorized", None),
+     50, 25, SGDR_TOKENS_25M, [(50, 25), (25, 50), (5, 70), (0, 75)], None, "vectorized", None, None),
     # vc: 5-phase gradual anneal, vectorized e-prop (cycle=30, SGDR 12.5M, 100M)
     #     0–12.5M: 20:10  12.5–25M: 10:20  25–37.5M: 5:25  37.5–50M: 2:28  50M+: 0:30
     ("vc", "anneal 5-phase vectorized (20:10→10:20→5:25→2:28→0:30, SGDR 12.5M)",
-     20, 10, SGDR_TOKENS_12M, [(20, 10), (10, 20), (5, 25), (2, 28), (0, 30)], None, "vectorized", None),
+     20, 10, SGDR_TOKENS_12M, [(20, 10), (10, 20), (5, 25), (2, 28), (0, 30)], None, "vectorized", None, None),
     # vd: identical to vc but sequential e-prop — speed/learning comparison
     ("vd", "anneal 5-phase sequential (20:10→10:20→5:25→2:28→0:30, SGDR 12.5M)",
-     20, 10, SGDR_TOKENS_12M, [(20, 10), (10, 20), (5, 25), (2, 28), (0, 30)], None, "sequential", None),
+     20, 10, SGDR_TOKENS_12M, [(20, 10), (10, 20), (5, 25), (2, 28), (0, 30)], None, "sequential", None, None),
     # ve: 5-phase anneal + beta_final=3.5 + SGDR 20M — keep HPC active throughout
     #     Motivation: beta=1.0 diffuses hippocampal retrieval after annealing; floor at 3.5
     #     maintains pattern-completion selectivity analogous to real hippocampus.
@@ -96,14 +97,20 @@ _VARIANTS = [
     #     0–20M: 20:10  20–40M: 10:20  40–60M: 5:25  60–80M: 2:28  80M+: 0:30
     ("ve", "anneal 5-phase SGDR 20M + beta_final=3.5 (20:10→10:20→5:25→2:28→0:30)",
      20, 10, SGDR_TOKENS_20M, [(20, 10), (10, 20), (5, 25), (2, 28), (0, 30)], None, "vectorized",
-     ["hippocampus.beta=3.5"]),
+     ["hippocampus.beta=3.5"], None),
+    # vf: ve schedule + TRN competition (configs/scale_5m_trn.yaml)
+    #     TRN adds divisive normalization across thalamic relay outputs: cross-column spotlight.
+    #     All other settings identical to ve.
+    ("vf", "anneal 5-phase SGDR 20M + beta_final=3.5 + TRN (20:10→10:20→5:25→2:28→0:30)",
+     20, 10, SGDR_TOKENS_20M, [(20, 10), (10, 20), (5, 25), (2, 28), (0, 30)], None, "vectorized",
+     ["hippocampus.beta=3.5"], "configs/scale_5m_trn.yaml"),
 ]
 
 VARIANTS = {v[0]: v for v in _VARIANTS}
 
 
 def build_command(variant_id: str, args: argparse.Namespace) -> list[str]:
-    vid, label, eprop_steps, bptt_steps, sgdr_tokens, phase_schedule, max_tokens_override, eprop_mode, extra_overrides = VARIANTS[variant_id]
+    vid, label, eprop_steps, bptt_steps, sgdr_tokens, phase_schedule, max_tokens_override, eprop_mode, extra_overrides, config_override = VARIANTS[variant_id]
     eprop_batch  = args.eprop_batch
     max_tokens   = max_tokens_override if max_tokens_override is not None else args.max_tokens
 
@@ -150,8 +157,9 @@ def build_command(variant_id: str, args: argparse.Namespace) -> list[str]:
             f"logging.group={args.wandb_group}",
         ]
 
+    config = config_override if config_override is not None else BASE_CONFIG
     cmd = [sys.executable, "scripts/train.py",
-           "--config", BASE_CONFIG,
+           "--config", config,
            "--tokenizer", TOKENIZER]
     if getattr(args, "resume", None):
         cmd += ["--resume", args.resume]
@@ -160,7 +168,7 @@ def build_command(variant_id: str, args: argparse.Namespace) -> list[str]:
 
 
 def run_variant(variant_id: str, cmd: list[str], dry_run: bool, args: argparse.Namespace) -> bool:
-    vid, label, eprop_steps, bptt_steps, sgdr_tokens, phase_schedule, max_tokens_override, eprop_mode, extra_overrides = VARIANTS[variant_id]
+    vid, label, eprop_steps, bptt_steps, sgdr_tokens, phase_schedule, max_tokens_override, eprop_mode, extra_overrides, config_override = VARIANTS[variant_id]
     max_tokens = max_tokens_override if max_tokens_override is not None else args.max_tokens
     sgdr_str = f"{sgdr_tokens // 1_000_000}M" if sgdr_tokens else "none"
     print(f"\n{'='*72}")
