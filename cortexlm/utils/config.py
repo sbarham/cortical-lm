@@ -111,6 +111,8 @@ DEFAULT_CONFIG = {
         "eprop_mode": "sequential",    # sequential | vectorized
         "hybrid_eprop_steps_schedule": None,  # list of eprop_steps per SGDR cycle, e.g. [20,10,0]
         "hybrid_bptt_steps_schedule":  None,  # list of bptt_steps per SGDR cycle,  e.g. [10,20,30]
+        "hybrid_phase_trigger_tokens": None,  # advance phase schedule at this token interval,
+                                              # independent of SGDR (for flat-LR DAWN ablation)
 
     },
 
@@ -131,6 +133,7 @@ DEFAULT_CONFIG = {
         "grad_accum_steps": 1,       # gradient accumulation before optimizer.step()
         "compile": False,            # torch.compile(model) — BPTT only, incompatible with e-prop hooks
         "profile_steps": 0,          # if > 0, run torch.profiler for this many steps and save trace
+        "no_repeat": False,          # if true, stop at end of dataset instead of cycling epochs
     },
 
     "simulation": {

@@ -354,6 +354,7 @@ class _EpropBase:
     def train(self, train_loader, val_loader, logger=None, start_step: int = 0):
         tcfg   = self.config["training"]
         lcfg   = self.config["logging"]
+        no_repeat  = tcfg.get("no_repeat", False)
         max_steps  = tcfg.get("max_steps", 100_000)
         ckpt_dir   = tcfg.get("checkpoint_dir", "checkpoints")
         seq_len    = self.config["data"].get("seq_len", 128)
@@ -375,6 +376,12 @@ class _EpropBase:
         _sgdr_t0_steps = None
         if _sgdr_restart_tokens is not None:
             _sgdr_t0_steps = max(1, _sgdr_restart_tokens // tokens_per_step)
+
+        # Standalone phase trigger: advance DAWN phase schedule at a token interval
+        # independently of the LR schedule (enables flat-LR DAWN ablation).
+        _phase_trigger_tokens = self.config["learning"].get("hybrid_phase_trigger_tokens", None)
+        _phase_t0_steps = (max(1, _phase_trigger_tokens // tokens_per_step)
+                           if _phase_trigger_tokens is not None else None)
 
         # HPC beta annealing setup
         _hpc = getattr(self.model, "hippocampus", None)
@@ -412,6 +419,8 @@ class _EpropBase:
         state       = None
         step        = start_step
         tokens_seen = start_step * tokens_per_step
+        _last_logged_sgdr_cycle   = (start_step // _sgdr_t0_steps) - 1 if _sgdr_t0_steps else -1
+        _last_logged_phase_cycle  = (start_step // _phase_t0_steps) - 1 if _phase_t0_steps else -1
         train_iter  = iter(train_loader)
         # Expose iterator + loader so subclasses (e.g. hybrid BPTT phase) can pull
         # additional batches independently of the main e-prop loop.
@@ -433,9 +442,10 @@ class _EpropBase:
                     next(train_iter)
             # Pre-initialize SGDR cycle and phase schedule so the first train_step
             # sees the right ratio without waiting for the loop to reach that step.
-            if _sgdr_t0_steps is not None:
-                self._sgdr_t0_steps      = _sgdr_t0_steps
-                self._current_sgdr_cycle = start_step // _sgdr_t0_steps
+            _resume_t0 = _sgdr_t0_steps or _phase_t0_steps
+            if _resume_t0 is not None:
+                self._sgdr_t0_steps      = _resume_t0
+                self._current_sgdr_cycle = start_step // _resume_t0
                 if hasattr(self, "_update_phase_from_schedule"):
                     self._update_phase_from_schedule()
             print(f"  fast-forward complete"
@@ -447,6 +457,10 @@ class _EpropBase:
             try:
                 x, y = next(train_iter)
             except StopIteration:
+                if no_repeat:
+                    print(f"\n  [no_repeat] dataset exhausted at step {step:,} "
+                          f"({tokens_seen/1e6:.1f}M tokens) — stopping.")
+                    break
                 train_iter = iter(train_loader)
                 self._train_iter = train_iter
                 x, y = next(train_iter)
@@ -462,10 +476,26 @@ class _EpropBase:
             if _hpc_beta_anneal:
                 _hpc.update_beta(step, max_steps)
 
+            # Standalone phase trigger (no SGDR): advance cycle index from token count
+            # so _update_phase_from_schedule fires at the right moments even with flat LR.
+            if _phase_t0_steps is not None and _sgdr_t0_steps is None:
+                self._sgdr_t0_steps      = _phase_t0_steps
+                _new_cycle = step // _phase_t0_steps
+                self._current_sgdr_cycle = _new_cycle
+                if _new_cycle > _last_logged_phase_cycle:
+                    _last_logged_phase_cycle = _new_cycle
+                    print(f"\n  [phase trigger] cycle {_new_cycle} at step {step:,} "
+                          f"({tokens_seen / 1e6:.1f}M tokens)")
+
             # LR schedule: SGDR takes priority over cosine_decay
             if _sgdr_t0_steps is not None:
                 self._sgdr_t0_steps    = _sgdr_t0_steps
-                self._current_sgdr_cycle = step // _sgdr_t0_steps
+                _new_cycle = step // _sgdr_t0_steps
+                if _new_cycle > _last_logged_sgdr_cycle:
+                    _last_logged_sgdr_cycle = _new_cycle
+                    print(f"\n  [SGDR reset] cycle {_new_cycle} at step {step:,} "
+                          f"({tokens_seen / 1e6:.1f}M tokens), lr → {self.lr:.2e}")
+                self._current_sgdr_cycle = _new_cycle
                 cycle_pos = step % _sgdr_t0_steps
                 self._current_lr = self.lr * 0.5 * (
                     1.0 + math.cos(math.pi * cycle_pos / _sgdr_t0_steps)
@@ -925,17 +955,16 @@ class EpropHybridTrainer(_EpropBase):
         return (self._global_step % self._cycle_len) >= self.eprop_steps
 
     def _update_phase_from_schedule(self):
-        """Switch eprop/bptt step counts when a new SGDR cycle begins."""
+        """Switch eprop/bptt step counts when a new cycle begins."""
         if self._phase_schedule is None or self._sgdr_t0_steps is None:
             return
         cycle_idx = min(self._current_sgdr_cycle, len(self._phase_schedule) - 1)
         if cycle_idx == self._last_logged_phase:
             return
         new_eprop, new_bptt = self._phase_schedule[cycle_idx]
-        if new_eprop != self.eprop_steps or new_bptt != self.bptt_steps:
-            print(f"\n  [phase transition] SGDR cycle {cycle_idx}: "
-                  f"{self.eprop_steps}:{self.bptt_steps} → {new_eprop}:{new_bptt} "
-                  f"({'pure BPTT' if new_eprop == 0 else 'hybrid'})")
+        print(f"\n  [wake/sleep] cycle {cycle_idx}: "
+              f"{self.eprop_steps}:{self.bptt_steps} → {new_eprop}:{new_bptt} "
+              f"({'pure BPTT' if new_eprop == 0 else 'hybrid'})")
         self.eprop_steps = new_eprop
         self.bptt_steps  = new_bptt
         self._last_logged_phase = cycle_idx

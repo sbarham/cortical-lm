@@ -1,0 +1,104 @@
+# Phase 1n: Thalamic relay + L6 corticothalamic shortcut.
+# Single variable change vs phase1m_thalamus: l6_thalamic_shortcut=true.
+#
+# Addition:
+#   column.l6_thalamic_shortcut: true
+#   Adds W_l6_relay: a direct L6_E → thalamic relay connection.
+#   Gives Layer 6 a 2-step gradient path (L6 → relay → L4) in addition to
+#   the long recurrent route through the column stack.
+#   Biologically: L6 pyramidal neurons are the primary source of
+#   corticothalamic feedback; this closes the thalamocortical loop.
+#
+# All other settings identical to phase1m_thalamus.
+
+name: cortex-lm-phase1n-thalamus-l6
+version: "0.1"
+
+data:
+  dataset: tinystories
+  tokenizer: bpe
+  tokenizer_path: tokenizers/tinystories_bpe4096.pkl
+  vocab_size: 4096
+  seq_len: 128
+
+neuron:
+  model: rate_adex
+  nonlinearity: tanh
+  tau_m_dist: lognormal
+  tau_m_range: [2, 30]
+  tau_w_dist: lognormal
+  tau_w_range: [30, 500]
+  adaptation_a: 0.1
+  learn_taus: false
+
+synapse:
+  inter_column_stp: true
+  tau_f_range: [50, 300]
+  tau_d_range: [100, 800]
+  U0_e: 0.2
+  U0_i: 0.5
+
+column:
+  model: layered
+  n_columns: 8
+  disinhibition: false
+  l6_thalamic_shortcut: true     # <-- corticothalamic return projection
+  layer_sizes:
+    l4:  {n_e: 16, n_i: 4}
+    l23: {n_e: 32, n_i: 8}
+    l5:  {n_e: 16, n_i: 4}
+    l6:  {n_e: 12, n_i: 3}
+
+connectivity:
+  type: gaussian_1d
+  p_max: 0.7
+  sigma: 2.0
+
+hippocampus:
+  model: modern_hopfield
+  n_memories: 64
+  d_model: 64
+  beta: 1.0
+  ca1: false
+
+thalamus:
+  enabled: true
+  embed_dim_large: 32
+  col_input_dim: 32
+  trn_competition: false
+
+readout:
+  source: l5
+  n_layers: 1
+  hidden_dim: 128
+
+embedding:
+  dim: 32
+
+learning:
+  rule: bptt
+  truncated_bptt_k: 32
+  reset_state_between_batches: false
+
+training:
+  batch_size: 512
+  max_tokens: 1_000_000_000
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  optimizer: adamw
+  scheduler: cosine
+  warmup_steps: 100
+  eval_tokens: 1_638_400
+  checkpoint_tokens: 32_768_000
+  seed: 42
+
+simulation:
+  dt: 1.0
+
+logging:
+  wandb: false
+  log_tokens: 1_638_400
+  log_weight_stats: true
+  log_tau_stats: true
+  log_spike_rates: true

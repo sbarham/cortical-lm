@@ -1,0 +1,108 @@
+# Phase 1m: Thalamic relay only (no corticothalamic return).
+# Single variable change vs phase1f_hopfield: thalamus.enabled=true.
+#
+# Addition:
+#   thalamus.enabled: true
+#   Replaces direct embedding broadcast with a learned thalamic relay:
+#   W_relay [n_cols, col_input_dim, embed_dim_large] projects the token
+#   embedding to a distinct input vector per column.  Each column receives
+#   a different linear read-out of the shared embedding, analogous to the
+#   specificity of thalamocortical projections in anatomy.
+#
+# The L6 corticothalamic shortcut is deliberately kept OFF here so that the
+# relay itself is isolated as a single variable change.  The return projection
+# (L6 → thalamus) is added in phase1n.
+#
+# All other settings identical to phase1f_hopfield.
+
+name: cortex-lm-phase1m-thalamic-relay
+version: "0.1"
+
+data:
+  dataset: tinystories
+  tokenizer: bpe
+  tokenizer_path: tokenizers/tinystories_bpe4096.pkl
+  vocab_size: 4096
+  seq_len: 128
+
+neuron:
+  model: rate_adex
+  nonlinearity: tanh
+  tau_m_dist: lognormal
+  tau_m_range: [2, 30]
+  tau_w_dist: lognormal
+  tau_w_range: [30, 500]
+  adaptation_a: 0.1
+  learn_taus: false
+
+synapse:
+  inter_column_stp: true
+  tau_f_range: [50, 300]
+  tau_d_range: [100, 800]
+  U0_e: 0.2
+  U0_i: 0.5
+
+column:
+  model: layered
+  n_columns: 8
+  disinhibition: false
+  l6_thalamic_shortcut: false    # corticothalamic return added in phase1n
+  layer_sizes:
+    l4:  {n_e: 16, n_i: 4}
+    l23: {n_e: 32, n_i: 8}
+    l5:  {n_e: 16, n_i: 4}
+    l6:  {n_e: 12, n_i: 3}
+
+connectivity:
+  type: gaussian_1d
+  p_max: 0.7
+  sigma: 2.0
+
+hippocampus:
+  model: modern_hopfield
+  n_memories: 64
+  d_model: 64
+  beta: 1.0
+  ca1: false
+
+thalamus:
+  enabled: true                  # <-- thalamic relay ON
+  embed_dim_large: 32            # matches embedding.dim at 650K scale
+  col_input_dim: 32              # column-facing dimension (per-column projection)
+  trn_competition: false         # TRN tested separately; keep off here
+
+readout:
+  source: l5
+  n_layers: 1
+  hidden_dim: 128
+
+embedding:
+  dim: 32
+
+learning:
+  rule: bptt
+  truncated_bptt_k: 32
+  reset_state_between_batches: false
+
+training:
+  batch_size: 512
+  max_tokens: 1_000_000_000
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  optimizer: adamw
+  scheduler: cosine
+  warmup_steps: 100
+  eval_tokens: 1_638_400
+  checkpoint_tokens: 32_768_000
+  seed: 42
+
+simulation:
+  dt: 1.0
+
+logging:
+  wandb: false
+  log_tokens: 1_638_400
+  log_weight_stats: true
+  log_tau_stats: true
+  log_spike_rates: true

@@ -288,10 +288,11 @@ class BPTTTrainer:
 
         return total_loss / max(n_chunks, 1), state
 
-    def train(self, train_loader, val_loader, logger=None):
+    def train(self, train_loader, val_loader, logger=None, start_step: int = 0):
         """Full training loop."""
         from tqdm import tqdm
         tcfg = self.config["training"]
+        no_repeat    = tcfg.get("no_repeat", False)
         max_steps    = _resolve_max_steps(self.config)
         eval_interval = _resolve_interval(self.config, "eval_tokens",       "eval_interval",       500)
         ckpt_interval = _resolve_interval(self.config, "checkpoint_tokens",  "checkpoint_interval", 5000)
@@ -323,6 +324,10 @@ class BPTTTrainer:
             try:
                 x, y = next(train_iter)
             except StopIteration:
+                if no_repeat:
+                    print(f"\n  [no_repeat] dataset exhausted at step {step:,} "
+                          f"({tokens_seen/1e6:.1f}M tokens) — stopping.")
+                    break
                 train_iter = iter(train_loader)
                 x, y = next(train_iter)
 
