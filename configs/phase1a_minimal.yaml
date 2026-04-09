@@ -24,8 +24,8 @@ synapse:
 column:
   model: simple_ei
   n_columns: 8
-  n_e: 40
-  n_i: 10
+  n_e: 24
+  n_i: 6
 
 connectivity:
   type: gaussian_1d
