@@ -31,7 +31,7 @@ DAWN settings (Experiment 1 and hybrid_dawn in Experiment 2):
   learning.eprop_mode       = vectorized
   Batch sizes               = 16 (e-prop) / 128 (BPTT consolidation)
   Wake/sleep ratio          = anneals 20:10 → 10:20 → 5:25 → 2:28 → 0:30
-  SGDR cycle                = 65.1M tokens  (521_044_049 // 8, exactly 8 cycles over full TinyStories)
+  SGDR cycle                = 20M tokens  (5 cycles × 20M = 100M budget, one per DAWN phase)
   column.apical_pathway     = additive  (exp1_dawn only; omitted in exp1_no_apical)
 
 Usage
@@ -67,13 +67,11 @@ import time
 TOKENIZER  = "tokenizers/tinystories_bpe4096.pkl"
 SEQ_LEN    = 256
 
-# SGDR cycle calibrated for full TinyStories (521,044,049 train tokens, 8 cycles).
-# Exact: 521_044_049 // 8 = 65_130_506.
-SGDR_TOKENS = 65_130_506   # exactly 8 cycles over full TinyStories train set
+# Hard token budget per run (~14h cluster wall-time limit).
+MAX_TOKENS = 100_000_000   # 100M tokens per run
 
-# Token budget: set very large; training stops at end-of-data via no_repeat=true.
-# Acts as a safety ceiling only.
-MAX_TOKENS_NO_REPEAT = 2_000_000_000   # 2B >> full TinyStories
+# SGDR cycle: 5 cycles × 20M = 100M — covers all 5 DAWN phase transitions exactly.
+SGDR_TOKENS = 20_000_000   # 20M tokens per SGDR cycle
 
 # DAWN learning overrides — shared by exp1_dawn and exp2_learning_rule/hybrid_dawn
 DAWN_OVERRIDES = [
@@ -88,8 +86,7 @@ DAWN_OVERRIDES = [
     "learning.hybrid_eprop_steps_schedule=[20,10,5,2,0]",
     "learning.hybrid_bptt_steps_schedule=[10,20,25,28,30]",
     "training.batch_size=16",
-    f"training.max_tokens={MAX_TOKENS_NO_REPEAT}",
-    "training.no_repeat=true",
+    f"training.max_tokens={MAX_TOKENS}",
 ]
 
 # ── Architecture ablation phases ──────────────────────────────────────────────
@@ -174,8 +171,7 @@ GROUPS = {
              "extra": [
                  "column.apical_pathway=additive",
                  "learning.rule=bptt",
-                 f"training.max_tokens={MAX_TOKENS_NO_REPEAT}",
-                 "training.no_repeat=true",
+                 f"training.max_tokens={MAX_TOKENS}",
                  # batch_size from config (512); no override needed
              ]}
             for p in ARCH_PHASES
@@ -198,8 +194,7 @@ GROUPS = {
                     "learning.rule=eprop",
                     "learning.eprop_mode=vectorized",
                     "training.batch_size=16",
-                    f"training.max_tokens={MAX_TOKENS_NO_REPEAT}",
-                    "training.no_repeat=true",
+                    f"training.max_tokens={MAX_TOKENS}",
                 ],
             },
             {
@@ -210,8 +205,7 @@ GROUPS = {
                 "extra": [
                     "column.apical_pathway=additive",
                     "learning.rule=bptt",
-                    f"training.max_tokens={MAX_TOKENS_NO_REPEAT}",
-                    "training.no_repeat=true",
+                    f"training.max_tokens={MAX_TOKENS}",
                 ],
             },
             {
@@ -229,8 +223,7 @@ GROUPS = {
                     "learning.hybrid_bptt_scope=full",
                     "learning.reset_state_between_batches=true",
                     "training.batch_size=16",
-                    f"training.max_tokens={MAX_TOKENS_NO_REPEAT}",
-                    "training.no_repeat=true",
+                    f"training.max_tokens={MAX_TOKENS}",
                 ],
             },
             {
@@ -249,8 +242,7 @@ GROUPS = {
                     "learning.reset_state_between_batches=true",
                     f"learning.sgdr_restart_tokens={SGDR_TOKENS}",
                     "training.batch_size=16",
-                    f"training.max_tokens={MAX_TOKENS_NO_REPEAT}",
-                    "training.no_repeat=true",
+                    f"training.max_tokens={MAX_TOKENS}",
                 ],
             },
             {
@@ -272,8 +264,7 @@ GROUPS = {
                     "learning.hybrid_eprop_steps_schedule=[20,10,5,2,0]",
                     "learning.hybrid_bptt_steps_schedule=[10,20,25,28,30]",
                     "training.batch_size=16",
-                    f"training.max_tokens={MAX_TOKENS_NO_REPEAT}",
-                    "training.no_repeat=true",
+                    f"training.max_tokens={MAX_TOKENS}",
                 ],
             },
             {
@@ -377,6 +368,10 @@ def main():
                         help="Extra key=value overrides forwarded to every run.")
     parser.add_argument("--stop-on-failure", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--srun-prefix", default=None,
+                        help="If set, print one 'srun-prefix <cmd>' line per phase "
+                             "instead of running. Useful for SLURM parallel submission. "
+                             "Example: --srun-prefix 'srun --gres=gpu:1 -n1 --time=14:00:00'")
     args = parser.parse_args()
 
     if args.groups == ["all"]:
@@ -397,8 +392,8 @@ def main():
     print(f"  Groups   : {args.groups}")
     print(f"  Phases   : {args.phases or '(all)'}")
     print(f"  Total    : {total} run(s)")
-    print(f"  no_repeat: true — training stops at end of TinyStories")
-    print(f"  SGDR T0  : {SGDR_TOKENS/1e6:.1f}M tokens (~8 cycles over full dataset)")
+    print(f"  Max tokens: {MAX_TOKENS/1e6:.0f}M per run")
+    print(f"  SGDR T0  : {SGDR_TOKENS/1e6:.0f}M tokens ({MAX_TOKENS//SGDR_TOKENS} cycles)")
     if args.dry_run:
         print("  *** DRY RUN ***")
     print()
@@ -428,6 +423,10 @@ def main():
 
         for phase in phases:
             cmd = build_command(phase, args)
+            if args.srun_prefix is not None:
+                print(f"{args.srun_prefix} {' '.join(cmd)}")
+                passed.append(f"{group_id}/{phase['id']}")
+                continue
             ok  = run_phase(phase, cmd, args.dry_run, args.wandb_offline)
             tag = f"{group_id}/{phase['id']}"
             (passed if ok else failed).append(tag)

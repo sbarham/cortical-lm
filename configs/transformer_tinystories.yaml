@@ -1,0 +1,32 @@
+name: transformer-tinystories
+version: "0.1"
+
+# Transformer baseline matched to the TinyStories paper experiments.
+# Parameter count is matched to phase1f_hopfield (best architecture) via
+# binary search in run_transformer_sgdr.py --cortex-config.
+# seq_len and dataset match all paper experiment configs exactly.
+
+data:
+  dataset: tinystories
+  tokenizer: bpe
+  vocab_size: 4096
+  seq_len: 128
+  tokenizer_path: tokenizers/tinystories_bpe4096.pkl
+
+baseline:
+  n_layers: 2   # appropriate depth for the ~650K param scale
+
+training:
+  batch_size: 512
+  max_tokens: 100000000
+  lr: 3e-4
+  weight_decay: 1e-4
+  grad_clip: 1.0
+  optimizer: adamw
+  log_tokens: 200000
+  eval_tokens: 1000000
+
+logging:
+  wandb: false
+  project: cortex-lm
+  group: paper-transformer
