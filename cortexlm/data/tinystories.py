@@ -90,7 +90,7 @@ def load_tinystories(config: dict, tokenizer, split: str = "train",
     from datasets import load_dataset
     from .cache import load_or_build
 
-    default_limit = 50_000_000 if split == "train" else 5_000_000
+    default_limit = 521_044_049 if split == "train" else 5_232_110
     n_tokens_limit = config["data"].get("tinystories_token_limit", default_limit)
 
     print(f"    TinyStories ({split}) — limit {n_tokens_limit:,} tokens")
