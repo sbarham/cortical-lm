@@ -303,6 +303,9 @@ class BPTTTrainer:
         import os
         os.makedirs(ckpt_dir, exist_ok=True)
 
+        import time as _time_bptt
+        _t_start = _time_bptt.time()
+
         self._persistent_state = None
         step = 0
         tokens_seen = 0
@@ -373,9 +376,13 @@ class BPTTTrainer:
                     )
                     tqdm.write(f"  grad norms | {parts}")
                 if logger:
+                    import time as _time_bptt
                     log_dict = {
-                        "train/loss": loss, "train/perplexity": ppl,
-                        "lr": lr, "tokens": tokens_seen,
+                        "train/loss":       loss,
+                        "train/perplexity": ppl,
+                        "lr":               lr,
+                        "tokens":           tokens_seen,
+                        "elapsed_min":      (_time_bptt.time() - _t_start) / 60.0,
                     }
                     log_dict.update(self._last_grad_norms)
                     _cols = getattr(self.model, "columns", None)

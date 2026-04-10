@@ -34,7 +34,7 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 
 from cortexlm.model import CortexLM, ModelState
-from cortexlm.utils.metrics import compute_perplexity, compute_effective_timescales
+from cortexlm.utils.metrics import compute_perplexity, compute_bpt, compute_effective_timescales
 
 
 # ── Eligibility trace buffer ──────────────────────────────────────────────────
@@ -155,6 +155,7 @@ class _EpropBase:
         # Diagnostic tracking — updated each train_step, logged at log_interval
         self._last_l_signal   = 0.0  # mean |learning signal| over last step's timesteps
         self._last_update_mag = 0.0  # mean |L × trace| gradient applied to recurrent weights
+        self._last_readout_grad_norm = 0.0  # readout param grad norm, sampled before zero_grad
 
     def _setup_traces(self):
         """
@@ -329,25 +330,67 @@ class _EpropBase:
             stats[f"{key}_p75"]  = float(np.percentile(taus, 75))
         return stats
 
+    @torch.no_grad()
+    def _collect_apical_stats(self) -> dict:
+        """Apical gate statistics (only when apical_pathway=additive is active)."""
+        cols   = getattr(self.model, "columns", None)
+        apical = getattr(cols, "apical", None) if cols is not None else None
+        if apical is None or getattr(apical, "variant", "none") != "additive":
+            return {}
+        gate_vals = torch.sigmoid(apical.apical_gate).detach()
+        return {
+            "apical/gate_mean": gate_vals.mean().item(),
+            "apical/gate_std":  gate_vals.std().item(),
+        }
+
     # ── Evaluation ───────────────────────────────────────────────────────────
 
     @torch.no_grad()
-    def evaluate(self, val_loader, max_batches: int = 50) -> float:
+    def evaluate(self, val_loader, max_batches: int = 50) -> tuple:
+        """Returns (avg_val_loss, dist_stats).
+
+        dist_stats keys: val/output_entropy, val/top5_conc, val/top10_conc,
+                         val/nll_entropy_gap
+        """
         from tqdm import tqdm
         self.model.eval()
-        total, n = 0.0, 0
+        total_loss = 0.0
+        total_entropy = 0.0
+        total_top5 = 0.0
+        total_top10 = 0.0
+        n = 0
         for i, (x, y) in enumerate(tqdm(val_loader, total=max_batches,
                                          desc="  evaluating", leave=False)):
             if i >= max_batches:
                 break
             x, y = x.to(self.device), y.to(self.device)
             logits, _ = self.model(x, self.model.init_state(x.shape[0]))
-            total += F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)), y.reshape(-1)
-            ).item()
+            flat_logits = logits.reshape(-1, logits.size(-1))
+            flat_y      = y.reshape(-1)
+            loss        = F.cross_entropy(flat_logits, flat_y)
+            total_loss += loss.item()
+
+            log_probs  = F.log_softmax(flat_logits, dim=-1)
+            probs      = log_probs.exp()
+            entropy    = -(probs * log_probs).sum(dim=-1).mean().item()
+            top5_conc  = probs.topk(5,  dim=-1).values.sum(dim=-1).mean().item()
+            top10_conc = probs.topk(10, dim=-1).values.sum(dim=-1).mean().item()
+            total_entropy += entropy
+            total_top5    += top5_conc
+            total_top10   += top10_conc
             n += 1
+
         self.model.train()
-        return total / max(n, 1)
+        denom    = max(n, 1)
+        avg_loss = total_loss / denom
+        avg_ent  = total_entropy / denom
+        dist_stats = {
+            "val/output_entropy":  avg_ent,
+            "val/top5_conc":       total_top5  / denom,
+            "val/top10_conc":      total_top10 / denom,
+            "val/nll_entropy_gap": avg_loss - avg_ent,
+        }
+        return avg_loss, dist_stats
 
     # ── Training loop ─────────────────────────────────────────────────────────
 
@@ -534,21 +577,32 @@ class _EpropBase:
                     with torch.no_grad():
                         trace_norms = [buf.grad.abs().mean().item()
                                        for _, buf, _, _ in self.param_traces]
-                    log_dict["eprop/trace_norm_mean"] = sum(trace_norms) / len(trace_norms)
-                    log_dict["eprop/l_signal"]        = self._last_l_signal
-                    log_dict["eprop/update_mag"]      = self._last_update_mag
+                    log_dict["eprop/trace_norm_mean"]   = sum(trace_norms) / len(trace_norms)
+                    log_dict["eprop/l_signal"]          = self._last_l_signal
+                    log_dict["eprop/update_mag"]        = self._last_update_mag
+                    log_dict["eprop/readout_grad_norm"] = self._last_readout_grad_norm
                 if _hpc_beta_anneal:
                     log_dict["hpc/beta"] = _hpc._beta_current
+                # Wake/sleep phase (EpropHybridTrainer only)
+                if hasattr(self, "eprop_steps"):
+                    total_cycle = self.eprop_steps + self.bptt_steps
+                    log_dict["eprop/eprop_steps"] = self.eprop_steps
+                    log_dict["eprop/bptt_steps"]  = self.bptt_steps
+                    log_dict["eprop/wake_frac"]   = (self.eprop_steps / max(total_cycle, 1))
+                # Apical gate stats (present when apical_pathway=additive)
+                log_dict.update(self._collect_apical_stats())
                 logger.log(log_dict, step=step)
 
             if step % eval_interval == 0:
-                val_loss = self.evaluate(val_loader)
-                aux_stats = self._collect_hopfield_stats()
+                val_loss, dist_stats = self.evaluate(val_loader)
+                aux_stats = {**dist_stats}
+                aux_stats.update(self._collect_hopfield_stats())
                 aux_stats.update(self._collect_tau_stats(val_loader))
                 if logger:
                     logger.log({
                         "val/loss":       val_loss,
                         "val/perplexity": compute_perplexity(val_loss),
+                        "val/bpt":        compute_bpt(val_loss),
                         "tokens":         tokens_seen + 1,
                         **aux_stats,
                     }, step=step)
@@ -598,6 +652,9 @@ class EpropApproxTrainer(_EpropBase):
             loss = F.cross_entropy(logits_grad, y[:, t])
             loss.backward()
             total_loss += loss.item()
+            if t == 0:
+                p0 = next(iter(self.model.readout.parameters()), None)
+                self._last_readout_grad_norm = p0.grad.norm().item() if (p0 is not None and p0.grad is not None) else 0.0
 
             L_scalar = ri.grad.abs().mean().item()
             l_acc += L_scalar
@@ -646,6 +703,8 @@ class EpropApproxTrainer(_EpropBase):
         # Scale by T: cross_entropy averages over B*T here vs B in sequential path
         L_scalar = ri_flat.grad.abs().mean().item() * T
         l_acc    = L_scalar
+        p0 = next(iter(self.model.readout.parameters()), None)
+        self._last_readout_grad_norm = p0.grad.norm().item() if (p0 is not None and p0.grad is not None) else 0.0
 
         nn.utils.clip_grad_norm_(self.model.readout.parameters(), self.grad_clip)
         if not self.freeze_readout:
@@ -718,6 +777,9 @@ class EpropTrainer(_EpropBase):
             loss = F.cross_entropy(logits_grad, y[:, t])
             loss.backward()
             total_loss += loss.item()
+            if t == 0:
+                p0 = next(iter(self.model.readout.parameters()), None)
+                self._last_readout_grad_norm = p0.grad.norm().item() if (p0 is not None and p0.grad is not None) else 0.0
 
             # L_j(t): mean over batch → [readout_dim]
             L_vec = ri.grad.detach().mean(dim=0)
@@ -787,6 +849,8 @@ class EpropTrainer(_EpropBase):
         L_grads = ri_flat.grad.reshape(B, T, -1) * T
         l_acc   = L_grads.abs().mean().item()
 
+        p0 = next(iter(self.model.readout.parameters()), None)
+        self._last_readout_grad_norm = p0.grad.norm().item() if (p0 is not None and p0.grad is not None) else 0.0
         nn.utils.clip_grad_norm_(self.model.readout.parameters(), self.grad_clip)
         if not self.freeze_readout:
             self.readout_optimizer.step(); self.readout_optimizer.zero_grad()
