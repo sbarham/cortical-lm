@@ -20,11 +20,14 @@ Usage
 # Dry-run: print all variants + predicted param counts
 python scripts/run_transformer_sweep.py --dry-run
 
-# Run all variants sequentially
+# Run all variants in series (just launch and watch)
+python scripts/run_transformer_sweep.py
+
+# Run with W&B logging
 python scripts/run_transformer_sweep.py --wandb --wandb-offline
 
 # Run a subset
-python scripts/run_transformer_sweep.py --runs l4_rope_swiglu l4_rope_swiglu_lr6e4 --wandb --wandb-offline
+python scripts/run_transformer_sweep.py --runs l4_rope_swiglu l4_rope_swiglu_lr6e4
 
 # Print srun commands for parallel cluster submission
 python scripts/run_transformer_sweep.py \\
@@ -185,6 +188,7 @@ def train_one(vid, model, config, train_loader, val_loader, device, logger=None)
               f"~{max_steps // sgdr_t0_steps} cycles")
     print(f"  warmup={warmup_steps:,}  max_steps={max_steps:,}  "
           f"batch={tcfg['batch_size']}  lr={base_lr:.0e}")
+    sys.stdout.flush()
 
     while step < max_steps:
         try:
@@ -230,20 +234,24 @@ def train_one(vid, model, config, train_loader, val_loader, device, logger=None)
                     ).item()
                     n += 1
             val_loss /= max(n, 1)
+            elapsed = (_time.time() - t0) / 60.0
             print(f"  step={step:6d} | tokens={tokens_seen/1e6:5.1f}M "
-                  f"| val_ppl={compute_perplexity(val_loss):.2f} | lr={lr:.2e}")
+                  f"| val_ppl={compute_perplexity(val_loss):.2f} "
+                  f"| lr={lr:.2e} | {elapsed:.1f}min")
+            sys.stdout.flush()
             if logger:
                 logger.log({
                     "val/loss":       val_loss,
                     "val/perplexity": compute_perplexity(val_loss),
                     "tokens":         tokens_seen,
-                    "elapsed_min":    (_time.time() - t0) / 60.0,
+                    "elapsed_min":    elapsed,
                 }, step=step)
 
         step += 1
 
     elapsed = (_time.time() - t0) / 60.0
     print(f"  [{vid}] done in {elapsed:.1f} min")
+    sys.stdout.flush()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -339,15 +347,33 @@ def main():
         return
 
     # ── Run sweep ─────────────────────────────────────────────────────────────
-    print(f"\nTransformer sweep — {len(args.runs)} variant(s)")
+    n_total = len(args.runs)
+    budget_m = config["training"].get("max_tokens", MAX_TOKENS) // 1_000_000
+    sep = "=" * 72
+    print(f"\n{sep}")
+    print(f"  Transformer sweep — {n_total} variant(s) × {budget_m}M tokens each")
+    print(f"  Parameter target (phase1f): {target_params:,}")
+    print(f"  Device: {device}")
+    print(f"{sep}")
+    for i, vid in enumerate(args.runs, 1):
+        _, nl, nh, pos, act, lr, sgdr, lbl = VARIANTS[vid]
+        sgdr_str = f"SGDR {sgdr//1_000_000}M" if sgdr else "cosine"
+        print(f"  {i:>2}/{n_total}  {vid:<36}  L={nl} {pos:<8} {act:<6} "
+              f"lr={lr:.0e}  {sgdr_str}")
+    print(f"{sep}\n")
+    sys.stdout.flush()
+
     passed, failed = [], []
 
-    for vid in args.runs:
+    for run_idx, vid in enumerate(args.runs, 1):
         _, nl, nh, pos, act, lr, sgdr, label = VARIANTS[vid]
         d_model, n_params = match_size(target_params, vocab_size, nl, nh,
                                        seq_len, pos, act)
-        print(f"\n  Sizing: d_model={d_model}  params={n_params:,}  "
+        print(f"\n{sep}")
+        print(f"  [{run_idx}/{n_total}]  {vid}  —  {label}")
+        print(f"  d_model={d_model}  params={n_params:,}  "
               f"(target {target_params:,}, Δ={n_params-target_params:+,})")
+        sys.stdout.flush()
 
         model = _make(vocab_size, d_model, nl, nh, seq_len, pos, act)
 
@@ -381,11 +407,9 @@ def main():
             traceback.print_exc()
             failed.append(vid)
 
-    sep = "=" * 72
     print(f"\n{sep}")
-    print(f"  Done: {len(passed)} passed, {len(failed)} failed")
-    if failed:
-        print(f"  Failed: {failed}")
+    print(f"  Sweep complete: {len(passed)}/{n_total} passed"
+          + (f", {len(failed)} failed: {failed}" if failed else ""))
     print(f"{sep}\n")
 
 
