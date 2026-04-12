@@ -132,6 +132,14 @@ def main():
             pass
         if v.lower() in ("true", "false"):
             return v.lower() == "true"
+        # Handle lists/dicts: [2,30], [a,b,c], {key: val}
+        import yaml as _yaml
+        try:
+            parsed = _yaml.safe_load(v)
+            if not isinstance(parsed, str):
+                return parsed
+        except Exception:
+            pass
         return v
 
     def _nested_set(d, dotted_key, value):

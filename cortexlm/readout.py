@@ -5,6 +5,48 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# ── Activation helpers ────────────────────────────────────────────────────────
+
+class _SwiGLUBlock(nn.Module):
+    """SwiGLU: silu(gate(x)) * up(x) — two parallel linear projections."""
+    def __init__(self, in_dim: int, out_dim: int):
+        super().__init__()
+        self.gate = nn.Linear(in_dim, out_dim)
+        self.up   = nn.Linear(in_dim, out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.silu(self.gate(x)) * self.up(x)
+
+
+_ACTIVATIONS = {
+    "relu":  nn.ReLU,
+    "gelu":  nn.GELU,
+    "swish": nn.SiLU,
+    "silu":  nn.SiLU,
+}
+
+
+class _ReadoutBlock(nn.Module):
+    """One hidden block: (Linear|SwiGLU) → LayerNorm → Activation.
+
+    SwiGLU replaces both the linear projection and the activation, so no
+    separate activation module is added in that case.
+    """
+    def __init__(self, in_dim: int, out_dim: int, activation: str):
+        super().__init__()
+        if activation == "swiglu":
+            self.proj = _SwiGLUBlock(in_dim, out_dim)
+        else:
+            act_cls = _ACTIVATIONS.get(activation, nn.ReLU)
+            self.proj = nn.Sequential(nn.Linear(in_dim, out_dim), act_cls())
+        self.norm = nn.LayerNorm(out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.norm(self.proj(x))
+
+
+# ── ReadoutHead ───────────────────────────────────────────────────────────────
+
 class ReadoutHead(nn.Module):
     """
     Maps concatenated L5_E outputs across all columns to next-token logits.
@@ -12,51 +54,47 @@ class ReadoutHead(nn.Module):
     Input:  [batch, n_columns * n_l5e]
     Output: [batch, vocab_size]  (no softmax — use F.cross_entropy)
 
-    Architecture: n_readout_layers linear layers with LayerNorm + ReLU,
-    then either:
+    Architecture: n_layers hidden blocks of (Linear|SwiGLU) → LayerNorm,
+    with optional residual skip connections from block input to output
+    (applied on layers 2+ where dimensions match), then either:
       - a final Linear(hidden_dim, vocab_size)           [weight_tying: false]
       - F.linear(hidden, embedding.weight)               [weight_tying: true]
 
-    Weight tying (readout.weight_tying: true):
-        The output projection reuses the input embedding matrix transposed,
-        so vocab-size parameters are counted only once.  Requires the final
-        hidden representation to live in embedding_dim space; if hidden_dim !=
-        embedding_dim a small bridging linear is added automatically.
-
-    LayerNorm is used (not BatchNorm) for sequence-length independence
-    and biological plausibility (approximates gain normalisation).
+    Config keys (all under readout:):
+      n_layers     int   Number of hidden blocks          (default: 1)
+      hidden_dim   int   Hidden dimension per block       (default: 128)
+      activation   str   relu | gelu | swish | swiglu     (default: relu)
+      residual     bool  Add skip connections where dims match (default: false)
+      weight_tying bool  Reuse embedding matrix as output projection (default: false)
     """
 
     def __init__(self, input_dim: int, vocab_size: int, config: dict):
         super().__init__()
 
         rcfg       = config.get("readout", {})
-        n_layers   = rcfg.get("n_layers", 2)
-        hidden_dim = rcfg.get("hidden_dim", 256)
+        n_layers   = rcfg.get("n_layers", 1)
+        hidden_dim = rcfg.get("hidden_dim", 128)
+        activation = rcfg.get("activation", "relu").lower()
+        residual   = bool(rcfg.get("residual", False))
         self.weight_tying = rcfg.get("weight_tying", False)
         embed_dim  = config.get("embedding", {}).get("dim", 64)
 
-        layers = []
+        self._residual = residual
+
+        self._blocks = nn.ModuleList()
+        self._block_in_dims: list[int] = []
         in_dim = input_dim
         for _ in range(n_layers):
-            layers += [
-                nn.Linear(in_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.ReLU(),
-            ]
+            self._blocks.append(_ReadoutBlock(in_dim, hidden_dim, activation))
+            self._block_in_dims.append(in_dim)
             in_dim = hidden_dim
 
         if self.weight_tying:
-            # Bridge to embedding_dim if necessary, then use tied output projection.
-            if in_dim != embed_dim:
-                layers.append(nn.Linear(in_dim, embed_dim))
-                in_dim = embed_dim
-            # No final linear added here — forward() uses F.linear with tied weight.
+            self._bridge = nn.Linear(in_dim, embed_dim) if in_dim != embed_dim else None
             self._tied_weight: torch.Tensor | None = None
         else:
-            layers.append(nn.Linear(in_dim, vocab_size))
-
-        self.net = nn.Sequential(*layers)
+            self._bridge = None
+            self._out = nn.Linear(in_dim, vocab_size)
 
     # ── Weight tying ─────────────────────────────────────────────────────────
 
@@ -86,8 +124,15 @@ class ReadoutHead(nn.Module):
         Returns:
             logits: [batch, vocab_size]
         """
-        hidden = self.net(l5_concat)
+        x = l5_concat
+        for blk, in_dim in zip(self._blocks, self._block_in_dims):
+            out = blk(x)
+            if self._residual and in_dim == out.shape[-1]:
+                out = out + x
+            x = out
+
         if self.weight_tying:
-            # tied_weight: [vocab_size, embed_dim] — F.linear transposes it
-            return F.linear(hidden, self._tied_weight)
-        return hidden
+            if self._bridge is not None:
+                x = self._bridge(x)
+            return F.linear(x, self._tied_weight)
+        return self._out(x)

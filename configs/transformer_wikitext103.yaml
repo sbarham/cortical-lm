@@ -1,0 +1,27 @@
+name: transformer-wikitext103
+version: "0.1"
+
+# Transformer baseline config for the 10M parameter WikiText-103 sweep.
+# Parameter count is matched to ~10M via binary search in run_transformer_10m_sweep.py.
+# seq_len=256 matches standard_wikitext103.yaml.
+
+data:
+  dataset: wikitext103
+  tokenizer: bpe
+  vocab_size: 8192
+  seq_len: 256
+
+training:
+  batch_size: 128
+  max_tokens: 100_000_000       # 100M tokens (matches 1× WT103 train set)
+  lr: 3e-4
+  weight_decay: 1e-4
+  grad_clip: 1.0
+  optimizer: adamw
+  log_tokens: 500_000           # log every 500K tokens
+  eval_tokens: 5_000_000        # eval every 5M tokens
+
+logging:
+  wandb: false
+  project: cortex-lm
+  group: transformer-10m-sweep

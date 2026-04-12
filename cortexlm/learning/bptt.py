@@ -313,9 +313,21 @@ class BPTTTrainer:
         _t_start = _time_bptt.time()
 
         self._persistent_state = None
-        step = 0
-        tokens_seen = 0
-        train_iter = iter(train_loader)
+        step        = start_step
+        seq_len     = self.config["data"]["seq_len"]
+        tokens_seen = start_step * self.config["training"]["batch_size"] * seq_len
+        train_iter  = iter(train_loader)
+
+        if start_step > 0:
+            print(f"  resuming from step {start_step:,} ({tokens_seen/1e6:.1f}M tokens) — "
+                  f"fast-forwarding data loader...")
+            for _skip in range(start_step):
+                try:
+                    next(train_iter)
+                except StopIteration:
+                    train_iter = iter(train_loader)
+                    next(train_iter)
+            print("  fast-forward complete")
 
         # HPC beta annealing setup
         _hpc = getattr(self.model, "hippocampus", None)
@@ -330,7 +342,9 @@ class BPTTTrainer:
         _tau_snap_tokens = lcfg.get("tau_snapshot_tokens", 0)
         _tau_snap_dir = lcfg.get("tau_snapshot_dir",
                                   os.path.join(ckpt_dir, "tau_snapshots"))
-        _last_tau_snap = -1
+        # On resume, pre-fill so we don't retake snapshots already saved
+        _last_tau_snap = (tokens_seen // _tau_snap_tokens - 1
+                          if _tau_snap_tokens > 0 else -1)
 
         pbar = tqdm(total=max_steps, unit="step", dynamic_ncols=True)
         pbar.set_description("training")

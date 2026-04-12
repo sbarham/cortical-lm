@@ -337,6 +337,38 @@ GROUPS = {
         ],
     },
 
+    # ── AdEx contribution ablation ────────────────────────────────────────────
+    # 1a and 1b with AdEx neurons swapped in — isolates whether AdEx is an
+    # independent contributor or an enabler that requires layering/STP to shine.
+    # Comparison: exp1_dawn/1a (rate), exp1_dawn/1b (rate), exp1_dawn/1d (full).
+    "exp1_adex": {
+        "label":   "Exp 1 — AdEx contribution: 1a+AdEx and 1b+AdEx under DAWN  [§3.x]",
+        "section": "3.x",
+        "wandb_group_default": "paper-exp1-adex",
+        "phases": [
+            {
+                "id":     "1a-adex",
+                "label":  "1a (simple E/I) + AdEx neurons + DAWN",
+                "config": "configs/phase1a_minimal.yaml",
+                "run_prefix": "exp1-adex",
+                "extra": [
+                    "column.apical_pathway=additive",
+                    "neuron.model=rate_adex",
+                ] + DAWN_OVERRIDES,
+            },
+            {
+                "id":     "1b-adex",
+                "label":  "1b (layered, no STP) + AdEx neurons + DAWN",
+                "config": "configs/phase1b_layered.yaml",
+                "run_prefix": "exp1-adex",
+                "extra": [
+                    "column.apical_pathway=additive",
+                    "neuron.model=rate_adex",
+                ] + DAWN_OVERRIDES,
+            },
+        ],
+    },
+
     # ── Dense tau_eff-recording experiment ────────────────────────────────────
     # Architecture 1d (AdEx, no HPC) under three learning rules.
     # Snapshots save full per-neuron ACF-estimated effective timescales every 5M tokens.
