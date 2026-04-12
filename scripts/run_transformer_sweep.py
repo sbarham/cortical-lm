@@ -122,10 +122,15 @@ def _make(vocab_size, d_model, n_layers, n_heads, seq_len, pos_encoding, activat
 
 def match_size(target, vocab_size, n_layers, n_heads, seq_len,
                pos_encoding, activation) -> tuple[int, int]:
-    """Return (d_model, n_params) nearest to target, d_model a multiple of n_heads."""
-    lo, hi = 8, 4096
+    """Return (d_model, n_params) nearest to target.
+
+    d_model is rounded to a multiple of 2*n_heads so that d_head = d_model/n_heads
+    is always even — required by RoPE's rotate_half split.
+    """
+    step = 2 * n_heads   # guarantees even d_head for RoPE
+    lo, hi = step, 4096
     for _ in range(24):
-        mid = ((lo + hi) // 2 // n_heads) * n_heads
+        mid = ((lo + hi) // 2 // step) * step
         if mid <= lo:
             break
         try:

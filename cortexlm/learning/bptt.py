@@ -12,6 +12,7 @@ from cortexlm.model import CortexLM, ModelState
 from cortexlm.utils.metrics import compute_perplexity, compute_bpt, compute_bpb, compute_effective_timescales
 
 
+
 def _resolve_max_steps(config: dict) -> int:
     """Return max_steps, deriving from max_tokens if set (keeps total data constant across batch sizes)."""
     tcfg = config["training"]
@@ -102,9 +103,14 @@ class BPTTTrainer:
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max_steps - warmup)
         elif sched_name == "sgdr":
             # Cosine annealing with warm restarts.
-            # T_0: initial cycle length in steps (default: ~10% of run).
-            # T_mult: cycle length multiplier per restart (default: 2).
-            t0 = tcfg.get("sgdr_t0", max(50, (max_steps - warmup) // 10))
+            # T_0: initial cycle length in steps.  Prefer sgdr_t0_tokens (token-based,
+            #       scales with batch size) over sgdr_t0 (raw step count).
+            # T_mult: cycle length multiplier per restart (1 = fixed-length cycles).
+            if "sgdr_t0_tokens" in tcfg:
+                _tps = tcfg.get("batch_size", 32) * config.get("data", {}).get("seq_len", 128)
+                t0 = max(1, int(tcfg["sgdr_t0_tokens"]) // _tps)
+            else:
+                t0 = tcfg.get("sgdr_t0", max(50, (max_steps - warmup) // 10))
             t_mult = tcfg.get("sgdr_t_mult", 2)
             self.scheduler = CosineAnnealingWarmRestarts(
                 self.optimizer, T_0=t0, T_mult=t_mult
@@ -319,6 +325,13 @@ class BPTTTrainer:
             and getattr(_hpc, "beta_init", None) is not None
         )
 
+        # Tau snapshot setup
+        lcfg = self.config.get("logging", {})
+        _tau_snap_tokens = lcfg.get("tau_snapshot_tokens", 0)
+        _tau_snap_dir = lcfg.get("tau_snapshot_dir",
+                                  os.path.join(ckpt_dir, "tau_snapshots"))
+        _last_tau_snap = -1
+
         pbar = tqdm(total=max_steps, unit="step", dynamic_ncols=True)
         pbar.set_description("training")
 
@@ -424,6 +437,12 @@ class BPTTTrainer:
             if step % ckpt_interval == 0 and step > 0:
                 self._save_checkpoint(ckpt_dir, step)
                 tqdm.write(f"  checkpoint saved → {ckpt_dir}/step_{step:07d}.pt")
+
+            if _tau_snap_tokens > 0:
+                _tau_snap_due = tokens_seen // _tau_snap_tokens
+                if _tau_snap_due > _last_tau_snap:
+                    _last_tau_snap = _tau_snap_due
+                    self._save_tau_eff_snapshot(val_loader, _tau_snap_dir, tokens_seen)
 
             if sample_interval > 0 and self.tokenizer is not None \
                     and step % sample_interval == 0 and step > 0:
@@ -612,6 +631,52 @@ class BPTTTrainer:
             stats[f"{key}_p25"]  = float(np.percentile(taus, 25))
             stats[f"{key}_p75"]  = float(np.percentile(taus, 75))
         return stats
+
+    @torch.no_grad()
+    def _save_tau_eff_snapshot(self, val_loader, snap_dir: str, tokens_seen: int):
+        """Estimate per-neuron effective timescales via ACF and save full distributions.
+
+        Saves tau_eff arrays (one value per neuron) for L4, L2/3, L5, L6 excitatory
+        populations.  Files: tau_<tokens:012d>.npz with keys l4e, l23e, l5e, l6e.
+        """
+        import os
+        import numpy as np
+        self.model.eval()
+        try:
+            x, _ = next(iter(val_loader))
+        except StopIteration:
+            return
+        x = x[:4].to(self.device)
+        seq_len = x.shape[1]
+        state = self.model.init_state(x.shape[0])
+
+        key_map = {"l4e": "r_l4e", "l23e": "r_l23e", "l5e": "r_l5e", "l6e": "r_l6e"}
+        traces = {k: [] for k in key_map}
+        for t in range(seq_len):
+            _, state = self.model.step(x[:, t], state)
+            col_state = state.column_states
+            for k, rk in key_map.items():
+                if rk in col_state:
+                    traces[k].append(col_state[rk].mean(dim=(0, 1)).cpu().numpy())
+
+        self.model.train()
+        arrays = {}
+        for k, trace_list in traces.items():
+            if not trace_list:
+                continue
+            arr = np.stack(trace_list)   # [T, n_neurons]
+            taus = compute_effective_timescales(
+                torch.from_numpy(arr), max_lag=min(50, seq_len // 4)
+            )
+            arrays[k] = taus.astype(np.float32)
+        if not arrays:
+            return
+        os.makedirs(snap_dir, exist_ok=True)
+        path = os.path.join(snap_dir, f"tau_{tokens_seen:012d}.npz")
+        np.savez(path, **arrays)
+        l23_mean = arrays["l23e"].mean() if "l23e" in arrays else float("nan")
+        tqdm.write(f"  [tau_eff] {tokens_seen/1e6:.0f}M tokens — "
+                   f"L2/3 mean={l23_mean:.1f}ms → {path}")
 
     def _save_checkpoint(self, ckpt_dir: str, step: int):
         import os

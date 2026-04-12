@@ -36,7 +36,6 @@ from typing import Dict, List, Optional, Tuple
 from cortexlm.model import CortexLM, ModelState
 from cortexlm.utils.metrics import compute_perplexity, compute_bpt, compute_effective_timescales
 
-
 # ── Eligibility trace buffer ──────────────────────────────────────────────────
 
 class EligibilityTraceBuffer:
@@ -331,6 +330,52 @@ class _EpropBase:
         return stats
 
     @torch.no_grad()
+    def _save_tau_eff_snapshot(self, val_loader, snap_dir: str, tokens_seen: int):
+        """Estimate per-neuron effective timescales via ACF and save full distributions.
+
+        Saves tau_eff arrays (one value per neuron) for L4, L2/3, L5, L6 excitatory
+        populations.  Files: tau_<tokens:012d>.npz with keys l4e, l23e, l5e, l6e.
+        """
+        import os
+        import numpy as np
+        self.model.eval()
+        try:
+            x, _ = next(iter(val_loader))
+        except StopIteration:
+            return
+        x = x[:4].to(self.device)
+        seq_len = x.shape[1]
+        state = self.model.init_state(x.shape[0])
+
+        key_map = {"l4e": "r_l4e", "l23e": "r_l23e", "l5e": "r_l5e", "l6e": "r_l6e"}
+        traces = {k: [] for k in key_map}
+        for t in range(seq_len):
+            _, state = self.model.step(x[:, t], state)
+            col_state = state.column_states
+            for k, rk in key_map.items():
+                if rk in col_state:
+                    traces[k].append(col_state[rk].mean(dim=(0, 1)).cpu().numpy())
+
+        self.model.train()
+        arrays = {}
+        for k, trace_list in traces.items():
+            if not trace_list:
+                continue
+            arr = np.stack(trace_list)   # [T, n_neurons]
+            taus = compute_effective_timescales(
+                torch.from_numpy(arr), max_lag=min(50, seq_len // 4)
+            )
+            arrays[k] = taus.astype(np.float32)
+        if not arrays:
+            return
+        os.makedirs(snap_dir, exist_ok=True)
+        path = os.path.join(snap_dir, f"tau_{tokens_seen:012d}.npz")
+        np.savez(path, **arrays)
+        l23_mean = arrays["l23e"].mean() if "l23e" in arrays else float("nan")
+        print(f"  [tau_eff] {tokens_seen/1e6:.0f}M tokens — "
+              f"L2/3 mean={l23_mean:.1f}ms → {path}")
+
+    @torch.no_grad()
     def _collect_apical_stats(self) -> dict:
         """Apical gate statistics (only when apical_pathway=additive is active)."""
         cols   = getattr(self.model, "columns", None)
@@ -436,6 +481,13 @@ class _EpropBase:
 
         import os
         os.makedirs(ckpt_dir, exist_ok=True)
+
+        # Tau snapshot setup
+        _lcfg = self.config.get("logging", {})
+        _tau_snap_tokens = _lcfg.get("tau_snapshot_tokens", 0)
+        _tau_snap_dir = _lcfg.get("tau_snapshot_dir",
+                                   os.path.join(ckpt_dir, "tau_snapshots"))
+        _last_tau_snap = -1
 
         # Profiling: if profile_steps > 0, trace the first N steps and save to disk
         profile_steps = tcfg.get("profile_steps", 0)
@@ -613,6 +665,12 @@ class _EpropBase:
                     "step": step, "model_state_dict": self.model.state_dict(),
                     "config": self.config,
                 }, path)
+
+            if _tau_snap_tokens > 0:
+                _tau_snap_due = tokens_seen // _tau_snap_tokens
+                if _tau_snap_due > _last_tau_snap:
+                    _last_tau_snap = _tau_snap_due
+                    self._save_tau_eff_snapshot(val_loader, _tau_snap_dir, tokens_seen)
 
             step += 1
 

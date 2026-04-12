@@ -73,6 +73,15 @@ MAX_TOKENS = 100_000_000   # 100M tokens per run
 # SGDR cycle: 5 cycles × 20M = 100M — covers all 5 DAWN phase transitions exactly.
 SGDR_TOKENS = 20_000_000   # 20M tokens per SGDR cycle
 
+# BPTT + SGDR overrides — matched to DAWN cycle length (SGDR_TOKENS per restart, T_mult=1)
+BPTT_SGDR_OVERRIDES = [
+    "learning.rule=bptt",
+    "training.scheduler=sgdr",
+    f"training.sgdr_t0_tokens={SGDR_TOKENS}",
+    "training.sgdr_t_mult=1",
+    f"training.max_tokens={MAX_TOKENS}",
+]
+
 # DAWN learning overrides — shared by exp1_dawn and exp2_learning_rule/hybrid_dawn
 DAWN_OVERRIDES = [
     "learning.rule=eprop_hybrid",
@@ -162,18 +171,13 @@ GROUPS = {
 
     # ── Experiment 2a ─────────────────────────────────────────────────────────
     "exp2_bptt": {
-        "label":   "Exp 2a — Architecture ablation under pure BPTT (with apical)  [§4.1]",
+        "label":   "Exp 2a — Architecture ablation under pure BPTT + SGDR (with apical)  [§4.1]",
         "section": "4.1",
         "wandb_group_default": "paper-exp2-bptt",
         "phases": [
             {**p,
              "run_prefix": "exp2-bptt",
-             "extra": [
-                 "column.apical_pathway=additive",
-                 "learning.rule=bptt",
-                 f"training.max_tokens={MAX_TOKENS}",
-                 # batch_size from config (512); no override needed
-             ]}
+             "extra": ["column.apical_pathway=additive"] + BPTT_SGDR_OVERRIDES}
             for p in ARCH_PHASES
         ],
     },
@@ -273,6 +277,109 @@ GROUPS = {
                 "config": "configs/phase1f_hopfield.yaml",
                 "run_prefix": "exp2-lr",
                 "extra": ["column.apical_pathway=additive"] + DAWN_OVERRIDES,
+            },
+        ],
+    },
+}
+
+    # ── HPC beta annealing ablation ───────────────────────────────────────────
+    # Three runs derived from exp1-dawn-1f, varying beta_init/beta/beta_anneal_frac.
+    # All use DAWN overrides + normalize_xi + normalize_query_forward + freeze_xi.
+    "exp1_hpc_beta": {
+        "label":   "Exp 1 — HPC beta annealing ablation (derived from 1f + DAWN)  [§3.2]",
+        "section": "3.2",
+        "wandb_group_default": "paper-exp1-hpc-beta",
+        "phases": [
+            {
+                "id":     "b8to1",
+                "label":  "1f + beta annealing: 8→1 over 25% of training",
+                "config": "configs/phase1f_hopfield.yaml",
+                "run_prefix": "exp1-dawn-1f",
+                "extra": [
+                    "column.apical_pathway=additive",
+                    "hippocampus.normalize_xi=true",
+                    "hippocampus.normalize_query_forward=true",
+                    "hippocampus.freeze_xi_during_bptt=true",
+                    "hippocampus.beta_init=8.0",
+                    "hippocampus.beta=1.0",
+                    "hippocampus.beta_anneal_frac=0.25",
+                ] + DAWN_OVERRIDES,
+            },
+            {
+                "id":     "b8to4",
+                "label":  "1f + beta annealing: 8→4 over 25% of training",
+                "config": "configs/phase1f_hopfield.yaml",
+                "run_prefix": "exp1-dawn-1f",
+                "extra": [
+                    "column.apical_pathway=additive",
+                    "hippocampus.normalize_xi=true",
+                    "hippocampus.normalize_query_forward=true",
+                    "hippocampus.freeze_xi_during_bptt=true",
+                    "hippocampus.beta_init=8.0",
+                    "hippocampus.beta=4.0",
+                    "hippocampus.beta_anneal_frac=0.25",
+                ] + DAWN_OVERRIDES,
+            },
+            {
+                "id":     "b8fixed",
+                "label":  "1f + beta fixed at 8 (no annealing)",
+                "config": "configs/phase1f_hopfield.yaml",
+                "run_prefix": "exp1-dawn-1f",
+                "extra": [
+                    "column.apical_pathway=additive",
+                    "hippocampus.normalize_xi=true",
+                    "hippocampus.normalize_query_forward=true",
+                    "hippocampus.freeze_xi_during_bptt=true",
+                    "hippocampus.beta_init=8.0",
+                    "hippocampus.beta=8.0",
+                    "hippocampus.beta_anneal_frac=1.0",
+                ] + DAWN_OVERRIDES,
+            },
+        ],
+    },
+
+    # ── Dense tau_eff-recording experiment ────────────────────────────────────
+    # Architecture 1d (AdEx, no HPC) under three learning rules.
+    # Snapshots save full per-neuron ACF-estimated effective timescales every 5M tokens.
+    # learn_taus left at default (false) — tau_eff is emergent from learned connectivity.
+    "exp1_tau": {
+        "label":   "Exp 1 — Dense tau_eff recording: 1d under DAWN / e-prop / BPTT  [§3.4]",
+        "section": "3.4",
+        "wandb_group_default": "paper-exp1-tau",
+        "phases": [
+            {
+                "id":     "dawn-1d",
+                "label":  "1d + DAWN — tau_eff snapshots every 5M tokens",
+                "config": "configs/phase1d_adex.yaml",
+                "run_prefix": "exp1-tau",
+                "extra": [
+                    "column.apical_pathway=additive",
+                    "logging.tau_snapshot_tokens=5000000",
+                ] + DAWN_OVERRIDES,
+            },
+            {
+                "id":     "eprop-1d",
+                "label":  "1d + pure e-prop — tau_eff snapshots every 5M tokens",
+                "config": "configs/phase1d_adex.yaml",
+                "run_prefix": "exp1-tau",
+                "extra": [
+                    "column.apical_pathway=additive",
+                    "logging.tau_snapshot_tokens=5000000",
+                    "learning.rule=eprop",
+                    "learning.eprop_mode=vectorized",
+                    "training.batch_size=16",
+                    f"training.max_tokens={MAX_TOKENS}",
+                ],
+            },
+            {
+                "id":     "bptt-1d",
+                "label":  "1d + pure BPTT + SGDR — tau_eff snapshots every 5M tokens",
+                "config": "configs/phase1d_adex.yaml",
+                "run_prefix": "exp1-tau",
+                "extra": [
+                    "column.apical_pathway=additive",
+                    "logging.tau_snapshot_tokens=5000000",
+                ] + BPTT_SGDR_OVERRIDES,
             },
         ],
     },
