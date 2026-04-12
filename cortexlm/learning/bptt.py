@@ -675,8 +675,8 @@ class BPTTTrainer:
         path = os.path.join(snap_dir, f"tau_{tokens_seen:012d}.npz")
         np.savez(path, **arrays)
         l23_mean = arrays["l23e"].mean() if "l23e" in arrays else float("nan")
-        tqdm.write(f"  [tau_eff] {tokens_seen/1e6:.0f}M tokens — "
-                   f"L2/3 mean={l23_mean:.1f}ms → {path}")
+        print(f"  [tau_eff] {tokens_seen/1e6:.0f}M tokens — "
+              f"L2/3 mean={l23_mean:.1f}ms → {path}", flush=True)
 
     def _save_checkpoint(self, ckpt_dir: str, step: int):
         import os
