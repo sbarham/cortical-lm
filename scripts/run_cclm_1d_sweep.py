@@ -471,7 +471,90 @@ VARIANTS = [
     },
 
     # ═══════════════════════════════════════════════════════════════════════
-    # SESSION 6 — Combinations (fill in after sessions 1–5 complete)
+    # SESSION 6 — STP parameters + embedding dimension
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # ── STP ──────────────────────────────────────────────────────────────
+    # Baseline: inter_column_stp=true, tau_f=[50,300], tau_d=[100,800],
+    #           U0_e=0.2, U0_i=0.5
+    {
+        "id":      "stp01",
+        "session": 6,
+        "label":   "No STP (inter_column_stp=false) — how much does STP contribute?",
+        "extra":   ["synapse.inter_column_stp=false"],
+    },
+    {
+        "id":      "stp02",
+        "session": 6,
+        "label":   "Fast facilitation tau_f=[20,100]ms",
+        "extra":   ["synapse.tau_f_range=[20,100]"],
+    },
+    {
+        "id":      "stp03",
+        "session": 6,
+        "label":   "Slow facilitation tau_f=[100,500]ms",
+        "extra":   ["synapse.tau_f_range=[100,500]"],
+    },
+    {
+        "id":      "stp04",
+        "session": 6,
+        "label":   "Fast depression tau_d=[50,300]ms",
+        "extra":   ["synapse.tau_d_range=[50,300]"],
+    },
+    {
+        "id":      "stp05",
+        "session": 6,
+        "label":   "Slow depression tau_d=[200,1500]ms",
+        "extra":   ["synapse.tau_d_range=[200,1500]"],
+    },
+    {
+        "id":      "stp06",
+        "session": 6,
+        "label":   "Higher excitatory release probability U0_e=0.4 (more depressing)",
+        "extra":   ["synapse.U0_e=0.4"],
+    },
+    {
+        "id":      "stp07",
+        "session": 6,
+        "label":   "Lower excitatory release probability U0_e=0.1 (less depressing)",
+        "extra":   ["synapse.U0_e=0.1"],
+    },
+    {
+        "id":      "stp08",
+        "session": 6,
+        "label":   "Lower inhibitory release probability U0_i=0.3 (less facilitating)",
+        "extra":   ["synapse.U0_i=0.3"],
+    },
+
+    # ── Embedding dimension ───────────────────────────────────────────────
+    # Baseline: embedding.dim=32
+    {
+        "id":      "emb01",
+        "session": 6,
+        "label":   "Smaller embedding dim=16",
+        "extra":   ["embedding.dim=16"],
+    },
+    {
+        "id":      "emb02",
+        "session": 6,
+        "label":   "Larger embedding dim=64 (2×)",
+        "extra":   ["embedding.dim=64"],
+    },
+    {
+        "id":      "emb03",
+        "session": 6,
+        "label":   "Large embedding dim=128 (4×)",
+        "extra":   ["embedding.dim=128"],
+    },
+    {
+        "id":      "emb04",
+        "session": 6,
+        "label":   "dim=64 + weight tying (embedding matches readout hidden_dim=128? bridge added automatically)",
+        "extra":   ["embedding.dim=64", "readout.weight_tying=true"],
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SESSION 7 — Combinations (fill in after sessions 1–6 complete)
     # ═══════════════════════════════════════════════════════════════════════
     # TBD: inspect best variants from each session, then define combos here.
 ]
