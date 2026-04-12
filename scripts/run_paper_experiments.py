@@ -280,7 +280,6 @@ GROUPS = {
             },
         ],
     },
-}
 
     # ── HPC beta annealing ablation ───────────────────────────────────────────
     # Three runs derived from exp1-dawn-1f, varying beta_init/beta/beta_anneal_frac.
